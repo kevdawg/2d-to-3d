@@ -30,6 +30,11 @@ sys.path.insert(0, str(SCRIPTS_DIR / "image_generation"))
 sys.path.insert(0, str(SCRIPTS_DIR / "model_generation"))
 sys.path.insert(0, str(SCRIPTS_DIR / "photo_preprocessing"))
 
+# Regional processing imports
+from roi_detector import ROIDetector
+from region_processor import RegionProcessor
+from depth_blender import DepthBlender
+
 # Import background removal functions
 from background_remover_removebg import remove_background
 from depth_masking import mask_depth_with_alpha
@@ -417,6 +422,140 @@ def run_marigold_cli(image_path: Path, depth_out: Path, marigold_opts: dict):
     return depth_out
 
 
+def run_marigold_with_regions(image_path: Path, depth_out: Path, config: dict):
+    """
+    Run Marigold with region-specific processing for faces/subjects vs background.
+    Includes automatic background removal before detection.
+    
+    Args:
+        image_path: Path to input image
+        depth_out: Path for final depth map output
+        config: Full config dict from config.yaml
+    
+    Returns:
+        Path to final depth map
+    """
+    region_config = config.get('region_processing', {})
+    
+    # Check if regional processing is enabled
+    if not region_config.get('enabled', False):
+        # Fall back to standard processing
+        marigold_opts = config['marigold_presets']['high_quality']
+        return run_marigold_cli(image_path, depth_out, marigold_opts)
+    
+    print(f"\n{'='*60}")
+    print(f"  Regional Depth Processing")
+    print(f"{'='*60}")
+    
+    # Create working directory for intermediate files
+    work_dir = depth_out.parent / f"{depth_out.stem}_regions"
+    work_dir.mkdir(exist_ok=True)
+    
+    # STEP 0: Remove background if enabled (should already be done, but double-check)
+    working_image = image_path
+    if config.get('remove_background', False) and not str(image_path).endswith('_nobg.png'):
+        print("\n[0/5] Background removal (if not already done)...")
+        nobg_path = image_path.parent / f"{image_path.stem}_nobg.png"
+        if nobg_path.exists():
+            print(f"   ✓ Using existing: {nobg_path.name}")
+            working_image = nobg_path
+        else:
+            # Background should have been removed earlier, but do it now if missing
+            working_image = remove_background_if_enabled(image_path, nobg_path)
+    
+    # STEP 1: Detect regions of interest
+    print("\n[1/5] Detecting subjects...")
+    detection_mode = region_config.get('detection_mode', 'human')
+    print(f"   Detection mode: {detection_mode}")
+    
+    detector = ROIDetector(
+        use_sam=region_config.get('use_sam', True),
+        detection_mode=detection_mode
+    )
+    
+    regions = detector.create_region_masks(
+        str(working_image),
+        detection_mode=detection_mode
+    )
+    
+    num_subjects = len(regions['faces'])
+    print(f"   Found {num_subjects} subject(s)")
+    
+    # Save visualization
+    vis_path = work_dir / "detected_regions.jpg"
+    detector.visualize_regions(working_image, regions, vis_path)
+    
+    # STEP 2: Process each region with custom settings
+    print("\n[2/4] Processing regions with custom settings...")
+    
+    processor = RegionProcessor(
+        marigold_cli_path=MARIGOLD_CLI,
+        conda_exe=CONDA_EXE,
+        marigold_env=MARIGOLD_ENV
+    )
+    
+    depth_maps = []
+    masks = []
+    
+    # Process faces
+    for i, (face_mask, face_box) in enumerate(zip(regions['faces'], regions['face_boxes'])):
+        region_name = f"face_{i+1}"
+        face_settings = region_config['face']
+        
+        depth = processor.process_region(
+            image_path=image_path,
+            mask=face_mask,
+            region_name=region_name,
+            preprocess_settings=face_settings['preprocessing'],
+            marigold_settings=face_settings['marigold'],
+            output_dir=work_dir
+        )
+        
+        depth_maps.append(depth)
+        masks.append(face_mask)
+        print(f"      ✓ Processed {region_name}")
+    
+    # Process background
+    bg_settings = region_config['background']
+    bg_depth = processor.process_region(
+        image_path=image_path,
+        mask=regions['background'],
+        region_name="background",
+        preprocess_settings=bg_settings['preprocessing'],
+        marigold_settings=bg_settings['marigold'],
+        output_dir=work_dir
+    )
+    
+    depth_maps.append(bg_depth)
+    masks.append(regions['background'])
+    print(f"      ✓ Processed background")
+    
+    # STEP 3: Blend depth maps
+    print("\n[3/4] Blending depth maps...")
+    blender = DepthBlender(blend_width=region_config.get('blend_width', 30))
+    
+    final_depth = blender.blend_depth_maps(
+        depth_maps=depth_maps,
+        masks=masks,
+        method='weighted',
+        normalize=True
+    )
+    
+    # Save blend visualization
+    blend_vis_path = work_dir / "blend_visualization.jpg"
+    blender.visualize_blend(depth_maps, masks, blend_vis_path)
+    
+    # STEP 4: Save final depth map
+    print("\n[4/4] Saving final depth map...")
+    Image.fromarray(final_depth, mode='I;16').save(depth_out)
+    
+    print(f"\n{OK} Regional processing complete!")
+    print(f"   Final depth: {depth_out.name}")
+    print(f"   Intermediate files: {work_dir.name}/")
+    
+    return depth_out
+
+
 def run_extrude_cli(depth_path: Path, stl_out: Path, extrude_params: dict):
     """Call extrude.py to produce STL from depth map."""
     cmd = ["python", str(EXTRUDE_CLI),
@@ -489,8 +628,11 @@ def process_single(image_path: Path, marigold_opts: dict, extrude_opts: dict, fi
         # Define output paths
         depth_out = run_dir / f"{name_with_quality}_depth_16bit.png"
 
-        # STEP 2: Run Marigold (depth only)
-        run_marigold_cli(working_image, depth_out, marigold_opts)
+        # STEP 2: Run Marigold and use regional processing if enabled
+        if cfg.get('region_processing', {}).get('enabled', False):
+            run_marigold_with_regions(working_image, depth_out, cfg)
+        else:
+            run_marigold_cli(working_image, depth_out, marigold_opts)
 
         # STEP 3: Mask depth map with alpha channel (remove background from depth)
         if REMOVE_BACKGROUND and working_image.suffix.lower() == '.png':

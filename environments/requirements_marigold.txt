@@ -1,10 +1,11 @@
 # Environment: marigold
-# Purpose: Marigold depth estimation
+# Purpose: Marigold depth estimation + ROI detection
 # Python: 3.10+
 
 # Core dependencies for Marigold depth estimation
 diffusers>=0.30.0
 torch>=2.0.0
+torchvision>=0.15.0              # Required by SAM
 transformers>=4.30.0
 
 # Image processing
@@ -19,3 +20,10 @@ tqdm>=4.65.0
 
 # Optional: Accelerate for faster inference
 accelerate>=0.20.0
+
+# Region of Interest Detection
+opencv-python>=4.8.0              # Face detection (Haar Cascades included)
+git+https://github.com/facebookresearch/segment-anything.git  # SAM segmentation
+requests>=2.31.0                  # For downloading SAM weights
+
+onnxruntime

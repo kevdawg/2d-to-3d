@@ -27,6 +27,7 @@
 #   https://github.com/prs-eth/Marigold#-citation
 # If you find Marigold useful, we kindly ask you to cite our papers.
 # --------------------------------------------------------------------------
+
 import math
 import os
 import zipfile
@@ -52,13 +53,10 @@ def quaternion_multiply(q1, q2):
 def glb_add_lights(path_input, path_output):
     """
     Adds directional lights in the horizontal plane to the glb file.
-    :param path_input: path to input glb
-    :param path_output: path to output glb
-    :return: None
     """
     glb = pygltflib.GLTF2().load(path_input)
 
-    N = 3  # default max num lights in Babylon.js is 4
+    N = 3
     angle_step = 2 * math.pi / N
     elevation_angle = math.radians(75)
 
@@ -82,7 +80,6 @@ def glb_add_lights(path_input, path_output):
     light_nodes = []
     for i in range(N):
         angle = i * angle_step
-
         pos_rot = [0.0, 0.0, math.sin(angle / 2), math.cos(angle / 2)]
         elev_rot = [
             math.sin(elevation_angle / 2),
@@ -91,7 +88,6 @@ def glb_add_lights(path_input, path_output):
             math.cos(elevation_angle / 2),
         ]
         rotation = quaternion_multiply(pos_rot, elev_rot)
-
         node = {
             "rotation": rotation,
             "extensions": {"KHR_lights_punctual": {"light": i}},
@@ -116,6 +112,7 @@ def extrude_depth_3d(
     path_rgb=None,
     path_out_base=None,
     output_model_scale=100,
+    max_height_mm=None,  # NEW PARAMETER
     filter_size=3,
     coef_near=0.0,
     coef_far=1.0,
@@ -128,22 +125,38 @@ def extrude_depth_3d(
     prepare_for_3d_printing=False,
     zip_outputs=False,
 ):
+    """
+    Convert depth map to 3D model with optional maximum height control.
+    
+    Args:
+        max_height_mm: Maximum height of relief in mm (overrides emboss calculation if set)
+                      If None, uses emboss parameter for relative scaling
+    """
+    # Calculate emboss depth based on max_height if provided
+    if max_height_mm is not None:
+        # We'll need to adjust emboss after we know the model's width scale
+        # Store it for later use
+        target_max_height = max_height_mm
+    else:
+        target_max_height = None
+    
     f_far_inner = -emboss
     f_far_outer = f_far_inner - f_back
-
     f_near = max(f_near, f_far_inner)
 
     depth_image = Image.open(path_depth)
-
     w, h = depth_image.size
     d_max = max(w, h)
     depth_image = np.array(depth_image).astype(np.double)
     depth_image = median_filter(depth_image, size=filter_size)
-    z_min, z_max = np.min(depth_image), np.max(depth_image)
+    z_min, z_max = np.min(depth_image), np.nanmax(depth_image)
     depth_image = (depth_image.astype(np.double) - z_min) / (z_max - z_min)
     depth_image[depth_image < coef_near] = coef_near
     depth_image[depth_image > coef_far] = coef_far
+    
+    # Apply emboss scaling
     depth_image = emboss * (depth_image - coef_near) / (coef_far - coef_near)
+    
     rgb_image = None
     if path_rgb is not None:
         rgb_image = np.array(
@@ -156,11 +169,12 @@ def extrude_depth_3d(
     h_half = h_norm / 2
 
     x, y = np.meshgrid(np.arange(w), np.arange(h))
-    x = x / float(d_max - 1) - w_half  # [-w_half, w_half]
-    y = -y / float(d_max - 1) + h_half  # [-h_half, h_half]
-    z = -depth_image  # -depth_emboss (far) - 0 (near)
+    x = x / float(d_max - 1) - w_half
+    y = -y / float(d_max - 1) + h_half
+    z = -depth_image
     vertices_2d = np.stack((x, y, z), axis=-1)
     vertices = vertices_2d.reshape(-1, 3)
+    
     if path_rgb is not None:
         colors = rgb_image[:, :, :3].reshape(-1, 3) / 255.0
     else:
@@ -174,19 +188,18 @@ def extrude_depth_3d(
             faces.append([idx + 1, idx + w, idx + 1 + w])
 
     # OUTER frame
-
     nv = len(vertices)
     vertices = np.append(
         vertices,
         [
-            [-w_half - f_thic, -h_half - f_thic, f_near],  # 00
-            [-w_half - f_thic, -h_half - f_thic, f_far_outer],  # 01
-            [w_half + f_thic, -h_half - f_thic, f_near],  # 02
-            [w_half + f_thic, -h_half - f_thic, f_far_outer],  # 03
-            [w_half + f_thic, h_half + f_thic, f_near],  # 04
-            [w_half + f_thic, h_half + f_thic, f_far_outer],  # 05
-            [-w_half - f_thic, h_half + f_thic, f_near],  # 06
-            [-w_half - f_thic, h_half + f_thic, f_far_outer],  # 07
+            [-w_half - f_thic, -h_half - f_thic, f_near],
+            [-w_half - f_thic, -h_half - f_thic, f_far_outer],
+            [w_half + f_thic, -h_half - f_thic, f_near],
+            [w_half + f_thic, -h_half - f_thic, f_far_outer],
+            [w_half + f_thic, h_half + f_thic, f_near],
+            [w_half + f_thic, h_half + f_thic, f_far_outer],
+            [-w_half - f_thic, h_half + f_thic, f_near],
+            [-w_half - f_thic, h_half + f_thic, f_far_outer],
         ],
         axis=0,
     )
@@ -204,11 +217,10 @@ def extrude_depth_3d(
     )
     colors = np.append(colors, [[0.5, 0.5, 0.5]] * 8, axis=0)
 
-    # INNER frame
-
+    # INNER frame sections (left, right, top, bottom)
     nv = len(vertices)
-    vertices_left_data = vertices_2d[:, 0]  # H x 3
-    vertices_left_frame = vertices_2d[:, 0].copy()  # H x 3
+    vertices_left_data = vertices_2d[:, 0]
+    vertices_left_frame = vertices_2d[:, 0].copy()
     vertices_left_frame[:, 2] = f_near
     vertices = np.append(vertices, vertices_left_data, axis=0)
     vertices = np.append(vertices, vertices_left_frame, axis=0)
@@ -220,8 +232,8 @@ def extrude_depth_3d(
         faces.append([nvi_d + 1, nvi_f, nvi_f + 1])
 
     nv = len(vertices)
-    vertices_right_data = vertices_2d[:, -1]  # H x 3
-    vertices_right_frame = vertices_2d[:, -1].copy()  # H x 3
+    vertices_right_data = vertices_2d[:, -1]
+    vertices_right_frame = vertices_2d[:, -1].copy()
     vertices_right_frame[:, 2] = f_near
     vertices = np.append(vertices, vertices_right_data, axis=0)
     vertices = np.append(vertices, vertices_right_frame, axis=0)
@@ -233,8 +245,8 @@ def extrude_depth_3d(
         faces.append([nvi_d + 1, nvi_f + 1, nvi_f])
 
     nv = len(vertices)
-    vertices_top_data = vertices_2d[0, :]  # H x 3
-    vertices_top_frame = vertices_2d[0, :].copy()  # H x 3
+    vertices_top_data = vertices_2d[0, :]
+    vertices_top_frame = vertices_2d[0, :].copy()
     vertices_top_frame[:, 2] = f_near
     vertices = np.append(vertices, vertices_top_data, axis=0)
     vertices = np.append(vertices, vertices_top_frame, axis=0)
@@ -246,8 +258,8 @@ def extrude_depth_3d(
         faces.append([nvi_d + 1, nvi_f + 1, nvi_f])
 
     nv = len(vertices)
-    vertices_bottom_data = vertices_2d[-1, :]  # H x 3
-    vertices_bottom_frame = vertices_2d[-1, :].copy()  # H x 3
+    vertices_bottom_data = vertices_2d[-1, :]
+    vertices_bottom_frame = vertices_2d[-1, :].copy()
     vertices_bottom_frame[:, 2] = f_near
     vertices = np.append(vertices, vertices_bottom_data, axis=0)
     vertices = np.append(vertices, vertices_bottom_frame, axis=0)
@@ -258,8 +270,7 @@ def extrude_depth_3d(
         faces.append([nvi_d, nvi_f, nvi_d + 1])
         faces.append([nvi_d + 1, nvi_f, nvi_f + 1])
 
-    # FRONT frame
-
+    # FRONT frame connections
     nv = len(vertices)
     vertices = np.append(
         vertices,
@@ -321,15 +332,14 @@ def extrude_depth_3d(
     faces.append([nv, nv + 1, nv + w + 1])
 
     # BACK frame
-
     nv = len(vertices)
     vertices = np.append(
         vertices,
         [
-            [-w_half - f_thic, -h_half - f_thic, f_far_outer],  # 00
-            [w_half + f_thic, -h_half - f_thic, f_far_outer],  # 01
-            [w_half + f_thic, h_half + f_thic, f_far_outer],  # 02
-            [-w_half - f_thic, h_half + f_thic, f_far_outer],  # 03
+            [-w_half - f_thic, -h_half - f_thic, f_far_outer],
+            [w_half + f_thic, -h_half - f_thic, f_far_outer],
+            [w_half + f_thic, h_half + f_thic, f_far_outer],
+            [-w_half - f_thic, h_half + f_thic, f_far_outer],
         ],
         axis=0,
     )
@@ -345,12 +355,33 @@ def extrude_depth_3d(
     if vertex_colors:
         trimesh_kwargs["vertex_colors"] = colors
     mesh = trimesh.Trimesh(vertices=vertices, faces=faces, **trimesh_kwargs)
-
     mesh.merge_vertices()
 
+    # Scale to desired width
     current_max_dimension = max(mesh.extents)
     scaling_factor = output_model_scale / current_max_dimension
     mesh.apply_scale(scaling_factor)
+    
+    # Apply max_height constraint if specified
+    if target_max_height is not None:
+        # Get current Z range (height)
+        z_coords = mesh.vertices[:, 2]
+        current_height = np.max(z_coords) - np.min(z_coords)
+        
+        if current_height > 0:
+            # Calculate additional scaling needed for Z axis only
+            height_scale = target_max_height / current_height
+            
+            # Apply non-uniform scaling (only affect Z)
+            z_scale_matrix = np.array([
+                [1, 0, 0, 0],
+                [0, 1, 0, 0],
+                [0, 0, height_scale, 0],
+                [0, 0, 0, 1]
+            ])
+            mesh.apply_transform(z_scale_matrix)
+            
+            print(f"  Applied max height: {target_max_height}mm (scaled Z by {height_scale:.2f}x)")
 
     if prepare_for_3d_printing:
         rotation_mat = trimesh.transformations.rotation_matrix(

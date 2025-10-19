@@ -48,6 +48,8 @@ def main():
     # Basic model parameters
     parser.add_argument("--width_mm", type=float, default=100.0,
                         help="Width of the 3D model in mm (default: 100)")
+    parser.add_argument("--max_height_mm", type=float, default=None,
+                        help="Maximum height of relief in mm (overrides emboss if set)")
     parser.add_argument("--smoothing", type=int, default=3,
                         help="Median filter size for smoothing, must be odd (default: 3)")
     
@@ -59,9 +61,9 @@ def main():
     
     # Frame/border parameters
     parser.add_argument("--emboss", type=float, default=0.3,
-                        help="Emboss depth factor 0.1-1.0 (default: 0.3)")
+                        help="Emboss depth factor 0.1-1.0 (default: 0.3, ignored if max_height_mm set)")
     parser.add_argument("--f_thic", type=float, default=0.05,
-                        help="Frame thickness 0.01-0.2 (default: 0.05)")
+                        help="Frame thickness 0.01-0.2 (default: 0.05, use 0 for no border)")
     parser.add_argument("--f_near", type=float, default=-0.15,
                         help="Front frame position -0.5-0.0 (default: -0.15)")
     parser.add_argument("--f_back", type=float, default=0.01,
@@ -95,7 +97,10 @@ def main():
         print(f"Note: Smoothing adjusted to {filter_size} (must be odd)")
     
     print(f"Converting depth map to 3D model...")
-    print(f"Scale: {args.width_mm}mm | Smoothing: {filter_size} | Emboss: {args.emboss}")
+    if args.max_height_mm:
+        print(f"Scale: {args.width_mm}mm wide × {args.max_height_mm}mm tall | Smoothing: {filter_size}")
+    else:
+        print(f"Scale: {args.width_mm}mm | Smoothing: {filter_size} | Emboss: {args.emboss}")
     
     try:
         # Call the extrude function with ALL parameters
@@ -104,6 +109,7 @@ def main():
             path_rgb=None,
             path_out_base=output_base,
             output_model_scale=args.width_mm,
+            max_height_mm=args.max_height_mm,
             filter_size=filter_size,
             coef_near=args.near_offset,
             coef_far=args.far_offset,
