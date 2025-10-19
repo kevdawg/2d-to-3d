@@ -1,0 +1,21 @@
+# Environment: marigold
+# Purpose: Marigold depth estimation
+# Python: 3.10+
+
+# Core dependencies for Marigold depth estimation
+diffusers>=0.30.0
+torch>=2.0.0
+transformers>=4.30.0
+
+# Image processing
+pillow>=10.0.0
+numpy>=1.24.0
+
+# Scientific computing (required for ensembling)
+scipy>=1.11.0
+
+# Progress bars
+tqdm>=4.65.0
+
+# Optional: Accelerate for faster inference
+accelerate>=0.20.0

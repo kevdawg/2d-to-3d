@@ -1,0 +1,164 @@
+# ========================================
+# 2D-to-3D Pipeline .gitignore
+# ========================================
+
+# ----------------------------------------
+# Credentials and Secrets (CRITICAL - DO NOT COMMIT)
+# ----------------------------------------
+*credentials*.json
+application_default_credentials.json
+pipeline/application_default_credentials.json
+service-account*.json
+*-key.json
+.env
+*.pem
+*.key
+
+# API Keys
+.api_keys
+api_keys.txt
+
+# ----------------------------------------
+# Downloaded Models (Large files - download via scripts)
+# ----------------------------------------
+# Models can be in multiple locations depending on setup
+models/
+marigold_model/
+rembg_models/
+/marigold_model/
+/rembg_models/
+**/marigold_model/
+**/rembg_models/
+
+# Model file extensions
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.onnx
+*.pb
+
+# ----------------------------------------
+# Data Files (Input/Output - user-specific)
+# ----------------------------------------
+# Data can be at root or in data/ directory
+2D_files/
+2D_files_enhanced/
+2D_enhanced/
+3D_files/
+/2D_files/
+/2D_files_enhanced/
+/2D_enhanced/
+/3D_files/
+data/2D_files/
+data/2D_files_enhanced/
+data/2D_enhanced/
+data/3D_files/
+**/2D_files/
+**/2D_files_enhanced/
+**/2D_enhanced/
+**/3D_files/
+
+# Keep directory structure but ignore contents
+!2D_files/.gitkeep
+!2D_files_enhanced/.gitkeep
+!2D_enhanced/.gitkeep
+!3D_files/.gitkeep
+!data/2D_files/.gitkeep
+!data/2D_files_enhanced/.gitkeep
+!data/2D_enhanced/.gitkeep
+!data/3D_files/.gitkeep
+
+# ----------------------------------------
+# Python
+# ----------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# ----------------------------------------
+# Conda Environments
+# ----------------------------------------
+envs/
+environments/*/
+!environments/*/environment.yml
+!environments/*/requirements.txt
+
+# ----------------------------------------
+# IDE and Editor Files
+# ----------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ----------------------------------------
+# Logs and Temporary Files
+# ----------------------------------------
+*.log
+logs/
+temp/
+tmp/
+*.tmp
+*.bak
+*.cache
+
+# ----------------------------------------
+# Jupyter Notebooks
+# ----------------------------------------
+.ipynb_checkpoints/
+*.ipynb
+
+# ----------------------------------------
+# OS Files
+# ----------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Desktop.ini
+
+# ----------------------------------------
+# Testing and Coverage
+# ----------------------------------------
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ----------------------------------------
+# Checkpoint Files
+# ----------------------------------------
+*checkpoint*.npz
+*_steps/
