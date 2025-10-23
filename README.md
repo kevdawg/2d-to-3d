@@ -312,20 +312,82 @@ Edit `pipeline/config.yaml` to customize:
 
 ## Roadmap
 
-Future enhancements planned:
+### Active Development (Priority Order)
 
-- ✅ **Regional processing** - Automatic face/subject detection (COMPLETE!)
-- 🚧 **Refined menu** - Simplify text and improve UX
-- 📦 **Docker container** - Simplified setup for compatible systems
-- 🎨 **Additional AI models** - More image generation options
-- ⚡ **Hardware optimization** - Better CPU/GPU support for all systems
-- 🌐 **Web interface** - Browser-based GUI for easier access
-- 🎥 **Video processing** - Depth map generation for video frames
-- 🖼️ **Batch enhancement** - Process entire folders automatically
-- 📊 **Quality metrics** - Automatic depth map quality assessment
-- 🔧 **Custom training** - Fine-tune models for specific use cases
+1. **✅ Regional Processing** - Automatic face/subject detection with localized enhancement (COMPLETE!)
+   - Detect faces, animals, objects automatically
+   - Apply high-detail settings to subjects, smoothing to backgrounds
+   - Seamless blending for professional results
 
-**Suggestions welcome!** Open an issue to propose new features.
+2. **🚧 Refined Menu & Workflow** - Simplify UI and improve folder structure
+   - Clearer menu options with better descriptions
+   - Streamlined folder organization
+   - Improved error messages and progress feedback
+   - Batch operations with progress tracking
+
+3. **📊 Quality Metrics** - Automated depth map quality assessment
+   - Depth consistency scoring
+   - Detail preservation metrics
+   - Noise detection and reporting
+   - Automatic setting recommendations based on quality
+   - Side-by-side comparison tools
+
+4. **⚡ Hardware Optimization** - Better CPU/GPU support for all systems
+   - Mixed precision inference (FP16/INT8) for faster processing
+   - Multi-GPU support for distributed processing
+   - Optimized CPU paths for systems without GPU
+   - Memory management improvements
+   - Model quantization for lower VRAM usage
+
+5. **✅ Automated Testing** - Ensure quality and catch regressions
+   - Unit tests for core functions
+   - Integration tests for full pipeline
+   - Reference image comparisons
+   - Performance benchmarks
+   - Settings validation and optimization
+
+### Planned Features
+
+**Quality & Features:**
+- 🔍 **AI Upscaling** - Pre-process images for better depth detail
+- 📏 **Scale Calibration** - Add real-world measurements to photos
+- 🎯 **Object-Specific Presets** - Optimized settings for:
+  - People (portraits, full body)
+  - Animals (pets, wildlife)
+  - Architecture (buildings, interiors)
+  - Nature (trees, landscapes)
+  - Jewelry (small objects, ultra-detail)
+  - Text & Patterns (flags, signs, documents, logos)
+- 📐 **Camera Intrinsics** - Import camera data for accurate depth
+- 🎨 **Surface Texture Mapping** - Preserve material texture (not color) in depth
+
+**Performance & Workflow:**
+- ☁️ **Cloud Processing** - Offload computation to cloud GPUs
+- 🔗 **Blender Addon** - Direct import with proper scaling
+- 🗂️ **Project Management** - Save/load settings per project
+- 📝 **Processing History** - Track successful settings
+- 🔔 **Notifications** - Alert when long jobs complete
+
+**Advanced Tools:**
+- 📱 **Mobile Companion App** - Upload photos from phone
+- 🌐 **Web Interface** - Browser-based GUI
+- 📦 **Docker Container** - Simplified setup
+- 🎨 **Additional AI Models** - More generation options
+
+**Specialized Modes:**
+- 📜 **Text Relief Mode** - Specialized for embossing text/logos
+- 💍 **Ultra-Detail Mode** - Maximum quality for small objects
+- 🏛️ **Architecture Mode** - Optimized for buildings/structures
+- 🌳 **Landscape Mode** - Optimized for outdoor scenes
+
+### Research & Exploration
+
+- 🎥 **Video Processing** - Generate depth for video frames
+- 🎭 **Style Transfer** - Apply artistic styles to depth
+- 🔬 **Custom Model Training** - Fine-tune for specific use cases
+- 📊 **Benchmark Suite** - Quality comparison tools
+
+**Have ideas?** Open an issue or discussion to suggest features!
 
 ## Contributing
 

@@ -20,6 +20,8 @@ import yaml
 import platform
 from rembg import remove
 from PIL import Image
+import trimesh
+import numpy as np
 
 # Add scripts directory to Python path
 HERE = Path(__file__).resolve().parent
@@ -51,7 +53,6 @@ with open(CONFIG_PATH, "r", encoding="utf-8") as f:
 CONDA_EXE = cfg.get("conda_exe", "conda")
 
 # --- FIX: Auto-detect full conda path to improve compatibility ---
-# If conda_exe is just 'conda', try to find the full path in the system's PATH
 if CONDA_EXE == "conda":
     conda_path = shutil.which("conda")
     if conda_path:
@@ -60,32 +61,42 @@ if CONDA_EXE == "conda":
     else:
         print("\nWARNING: Could not find 'conda' in the system PATH.")
         print("         Please specify the full path to 'conda.exe' or 'conda.bat' in config.yaml if you encounter errors.")
-# --- END FIX ---
 
+# Environment names
+AIGEN_ENV = cfg.get("aigen_env", "aigen")
 MARIGOLD_ENV = cfg.get("marigold_env", "marigold")
-DEPTH_ENV = cfg.get("depth_env", "depth")
-MARIGOLD_CLI = (HERE / cfg.get("marigold_cli", "marigold_cli.py")).resolve()
-EXTRUDE_CLI = (HERE / Path(cfg.get("extrude_cli", "../depth-to-3d-print/extrude.py"))).resolve()
-DIR_2D = (HERE / cfg.get("dir_2d", "../2D_files")).resolve()
-DIR_3D = (HERE / cfg.get("dir_3d", "../3D_files")).resolve()
+DEPTH_ENV = cfg.get("depth_env", "depth-to-3d")
+PHOTO_PREP_ENV = cfg.get("photo_prep_env", "photo-prep")
 USE_CONDA = bool(cfg.get("use_conda", True))
+
+# Script paths (relative to HERE which is pipeline/)
+MARIGOLD_CLI = (HERE / cfg.get("marigold_cli", "../scripts/depth_generation/marigold_cli.py")).resolve()
+EXTRUDE_CLI = (HERE / cfg.get("extrude_cli", "../scripts/model_generation/extrude_cli.py")).resolve()
+
+# Directory paths - FIXED (relative to HERE which is pipeline/)
+DIR_AI_GENERATED = (HERE / cfg.get("dir_ai_generated", "../data/AI_files")).resolve()
+DIR_PHOTOS = (HERE / cfg.get("dir_photos", "../data/Photos")).resolve()
+DIR_3D = (HERE / cfg.get("dir_3d", "../data/3D_files")).resolve()
+DIR_ENHANCED = (HERE / cfg.get("dir_enhanced", "../data/Photos_enhanced")).resolve()
 
 # Background removal settings
 REMOVE_BACKGROUND = bool(cfg.get("remove_background", True))
-BG_REMOVAL_METHOD = cfg.get("bg_removal_method", "removebg")  # "removebg" or "rembg"
-BG_REMOVAL_MODEL = cfg.get("bg_removal_model", "isnet-general-use")  # for rembg
-BG_CROP_ENABLED = bool(cfg.get("bg_crop_enabled", True))  # Auto-crop transparent borders
-BG_CROP_MARGIN = int(cfg.get("bg_crop_margin", 10))  # Pixels to leave around subject
-REMOVEBG_API_KEY = os.environ.get('REMOVEBG_API_KEY')  # from environment
+BG_REMOVAL_METHOD = cfg.get("bg_removal_method", "rembg")
+BG_REMOVAL_MODEL = cfg.get("bg_removal_model", "isnet-general-use")
+BG_CROP_ENABLED = bool(cfg.get("bg_crop_enabled", True))
+BG_CROP_MARGIN = int(cfg.get("bg_crop_margin", 10))
+REMOVEBG_API_KEY = os.environ.get('REMOVEBG_API_KEY')
 
 # Load presets and defaults from config
 MARIGOLD_PRESETS = cfg.get("marigold_presets", {})
 EXTRUDE_DEFAULTS = cfg.get("extrude_defaults", {})
 
-# ensure folders exist
-for d in (DIR_2D, DIR_3D):
+# Ensure folders exist - FIXED (no relative_to() call)
+print("Initializing directories...")
+for d in (DIR_AI_GENERATED, DIR_PHOTOS, DIR_3D, DIR_ENHANCED):
     d.mkdir(parents=True, exist_ok=True)
-
+    # Simple display without relative_to() to avoid path errors
+    print(f"  ✓ {d.name}/ -> {d}")
 
 # Windows-safe symbols
 def is_windows_cmd():
@@ -100,11 +111,13 @@ if is_windows_cmd():
     ERR = "[X]"
     WARN = "[!]"
     TRASH = "[DEL]"
+    INFO = "[i]"
 else:
     OK = "✅"
     ERR = "❌"
     WARN = "⚠️"
     TRASH = "🗑️"
+    INFO = "ℹ️"
 
 
 def run_cmd(cmd_list, show_timer=False, timer_message="Processing"):
@@ -219,21 +232,29 @@ def safe_name_from_prompt(prompt: str) -> str:
 def safe_name_from_file(file_path: Path) -> str:
     """
     Create a safe folder name from an existing file.
-    Uses the base filename without the timestamp suffix.
+    Uses the base filename, removing timestamps and quality suffixes.
     """
     base = file_path.stem
+    
     # Remove any existing timestamp patterns like _20251008_232149_575c44
     import re
-    cleaned = re.sub(r'_\d{8}_\d{6}_[a-f0-9]{6}', '', base)
-    return get_next_folder_name(cleaned, DIR_3D)
+    base = re.sub(r'_\d{8}_\d{6}_[a-f0-9]{6}', '', base)
+    
+    # Remove quality suffix if present (avoid "frog_low_quality_low_quality")
+    for quality in ['_low_quality', '_medium_quality', '_high_quality']:
+        if base.endswith(quality):
+            base = base[:-len(quality)]
+    
+    # Use get_next_folder_name to ensure uniqueness
+    return get_next_folder_name(base, DIR_3D)
 
 def remove_background_if_enabled(image_path: Path, output_path: Path = None) -> Path:
     """
     Remove background from image if enabled in config.
+    Uses rembg library for background removal.
     Returns path to processed image (either cleaned or original).
     """
     if not REMOVE_BACKGROUND:
-        # Background removal disabled - return original
         return image_path
     
     if output_path is None:
@@ -242,52 +263,29 @@ def remove_background_if_enabled(image_path: Path, output_path: Path = None) -> 
     try:
         print(f"  Removing background from {image_path.name}...")
         with Image.open(image_path) as input_img:
+            # Remove background using rembg
             output_img = remove(input_img)
+            
+            # Auto-crop transparent borders if enabled
+            if BG_CROP_ENABLED:
+                # Get bounding box of non-transparent pixels
+                bbox = output_img.getbbox()
+                if bbox:
+                    # Add margin
+                    width, height = output_img.size
+                    x1, y1, x2, y2 = bbox
+                    x1 = max(0, x1 - BG_CROP_MARGIN)
+                    y1 = max(0, y1 - BG_CROP_MARGIN)
+                    x2 = min(width, x2 + BG_CROP_MARGIN)
+                    y2 = min(height, y2 + BG_CROP_MARGIN)
+                    
+                    # Crop
+                    output_img = output_img.crop((x1, y1, x2, y2))
+                    print(f"    Cropped: {width}x{height} → {output_img.width}x{output_img.height}")
+            
             output_img.save(output_path, 'PNG')
+        
         print(f"  {OK} Background removed (transparent)")
-        return output_path
-    except Exception as e:
-        print(f"  {WARN} Background removal failed: {e}")
-        print(f"  {WARN} Continuing with original image...")
-        return image_path
-
-
-def remove_background_if_enabled(image_path: Path, output_path: Path = None) -> Path:
-    """
-    Remove background from image if enabled in config.
-    Uses remove.bg API (paid, high quality) or rembg (free).
-    Automatically crops transparent borders to reduce processing time.
-    Returns path to processed image (either cleaned or original).
-    """
-    if not REMOVE_BACKGROUND:
-        return image_path
-    
-    if output_path is None:
-        output_path = image_path.parent / f"{image_path.stem}_nobg.png"
-    
-    try:
-        print(f"  Removing background from {image_path.name}...")
-        
-        # Choose method and remove background with cropping
-        if BG_REMOVAL_METHOD == "removebg":
-            remove_background(
-                str(image_path), 
-                str(output_path), 
-                method="removebg", 
-                crop=BG_CROP_ENABLED,
-                margin=BG_CROP_MARGIN,
-                api_key=REMOVEBG_API_KEY
-            )
-        else:
-            remove_background(
-                str(image_path), 
-                str(output_path), 
-                method="rembg", 
-                crop=BG_CROP_ENABLED,
-                margin=BG_CROP_MARGIN,
-                model=BG_REMOVAL_MODEL
-            )
-        
         return output_path
         
     except Exception as e:
@@ -297,99 +295,191 @@ def remove_background_if_enabled(image_path: Path, output_path: Path = None) -> 
 
 
 def generate_via_gemini(user_desc: str, filename_out: Path):
-    """Call generate_with_gemini.py helper via subprocess (low quality, free)."""
+    """Call generate_with_gemini.py helper via subprocess in NO environment (uses base Python)."""
     gen_py = SCRIPTS_DIR / "image_generation" / "generate_with_gemini.py"
     if not gen_py.exists():
         raise RuntimeError(f"generate_with_gemini.py not found at {gen_py}")
+
+    # Run in gemini conda environment
+    cmd = ["python", str(gen_py), "--prompt", user_desc, "--out", str(filename_out)]
+    full_cmd = conda_prefix_cmd(AIGEN_ENV, cmd)
     
-    cmd = [sys.executable, str(gen_py), "--prompt", user_desc, "--out", str(filename_out)]
-    rc, output = run_cmd(cmd)
+    rc, output = run_cmd(full_cmd)
     if rc != 0:
         raise RuntimeError(f"Image generation failed.\n\nOutput:\n{output}")
     return filename_out
 
 
+
 def generate_via_imagen3(user_desc: str, filename_out: Path):
-    """Call generate_with_imagen3.py helper via subprocess (high quality, Imagen 3 via Vertex AI)."""
+    """Call generate_with_imagen3.py helper via subprocess in aigen conda environment."""
     gen_py = SCRIPTS_DIR / "image_generation" / "generate_with_imagen3.py"
     if not gen_py.exists():
         raise RuntimeError(f"generate_with_imagen3.py not found at {gen_py}")
     
-    # Suppress stderr warnings from gRPC/ALTS
-    cmd = [sys.executable, str(gen_py), "--prompt", user_desc, "--out", str(filename_out)]
+    # Get aigen environment name from config
+    aigen_env = cfg.get("aigen_env", "aigen")
     
-    # Run with stderr suppressed for cleaner output
+    # Run in aigen conda environment with suppressed stderr
+    cmd = ["python", str(gen_py), "--prompt", user_desc, "--out", str(filename_out)]
+    full_cmd = conda_prefix_cmd(aigen_env, cmd)
+    
+    # Run with custom error filtering
     import subprocess
     try:
-        result = subprocess.run(
-            cmd, 
-            capture_output=True, 
+        # Set environment variables to suppress gRPC warnings
+        env = os.environ.copy()
+        env['GRPC_VERBOSITY'] = 'ERROR'
+        env['GLOG_minloglevel'] = '2'
+        
+        proc = subprocess.Popen(
+            full_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             text=True,
+            encoding='utf-8',
+            errors='replace',
+            env=env,
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         )
         
-        # Only print stdout (our actual messages), skip stderr (gRPC warnings)
-        if result.stdout:
-            for line in result.stdout.strip().split('\n'):
-                print(f"    {line}")
+        stdout, stderr = proc.communicate()
         
-        if result.returncode != 0:
-            # If it failed, show the error
-            if result.stderr:
-                print(f"    Error output: {result.stderr}")
-            raise RuntimeError(f"Image generation failed with exit code {result.returncode}")
-            
+        # Print stdout
+        if stdout:
+            for line in stdout.strip().split('\n'):
+                if line.strip():
+                    print(f"    {line}")
+        
+        if proc.returncode != 0:
+            raise RuntimeError(f"Image generation failed with exit code {proc.returncode}")
+        
         return filename_out
         
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Image generation failed.\n\nOutput:\n{e.output}")
+    except Exception as e:
+        raise RuntimeError(f"Image generation failed: {e}")
 
 
-def generate_image_interactive(use_high_quality=False):
-    """Interactive image generation with user prompt."""
+# ============================================
+# INTERACTIVE WRAPPERS
+# ============================================
+
+def generate_ai_image_menu():
+    """Submenu for AI image generation."""
+    
+    print(f"\n{'─'*60}")
+    print("GENERATE AI IMAGE")
+    print('─'*60)
+    print("  1. Gemini (FREE, basic quality)")
+    print("  2. Imagen ($0.04, high quality)")
+    print("  3. Back to main menu")
+    print('─'*60)
+    
+    choice = input("\nSelect option [1-3]: ").strip()
+    
+    if choice == "1":
+        generate_with_gemini_interactive()
+    elif choice == "2":
+        generate_with_aigen_interactive()
+    elif choice == "3":
+        return
+    else:
+        print(f"\n{ERR} Invalid option.")
+        generate_ai_image_menu()
+
+
+def generate_with_gemini_interactive():
+    """Interactive Gemini image generation."""
+    
+    print(f"\n{'─'*60}")
+    print("GENERATE WITH GEMINI (FREE)")
+    print('─'*60)
+    
     prompt = input("\nEnter image description (or 'cancel'): ").strip()
     if prompt.lower() == "cancel":
         return
     
-    # Use prompt as the base filename
+    # Create safe filename from prompt
     safe_prompt = "".join([c if c.isalnum() or c in ("-", "_", " ") else "_" for c in prompt])
     safe_prompt = safe_prompt.strip().replace(" ", "_")[:50]
-    out_path = DIR_2D / f"{safe_prompt}.png"
     
-    # Add number if file exists
+    # Check if output file already exists
+    out_path = DIR_AI_GENERATED / f"{safe_prompt}.png"
     counter = 2
     while out_path.exists():
-        out_path = DIR_2D / f"{safe_prompt}_{counter}.png"
+        out_path = DIR_AI_GENERATED / f"{safe_prompt}_{counter}.png"
         counter += 1
     
     try:
-        start_time = time.time()  # START TIMING
+        start_time = time.time()
         
-        if use_high_quality:
-            print(f"\nGenerating with Imagen 3 (high quality)...")
-            generate_via_imagen3(prompt, out_path)
-        else:
-            print(f"\nGenerating with Gemini (basic quality)...")
-            generate_via_gemini(prompt, out_path)
+        print(f"\nGenerating with Gemini (FREE tier)...")
+        generate_via_gemini(prompt, out_path)
         
-        # SHOW TIMING
+        # Show timing
         elapsed = time.time() - start_time
         mins, secs = divmod(int(elapsed), 60)
         time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
         
-        quality = "high quality" if use_high_quality else "basic quality"
         print(f"\n{OK} Image saved: {out_path.name}")
-        print(f"   Generation time ({quality}): {time_str}")
+        print(f"   Generation time: {time_str}")
+        print(f"   Saved to: AI_files/{out_path.name}")
         
     except Exception as e:
         print(f"\n{ERR} Image generation failed: {e}")
+    
+    input("\nPress Enter to continue...")
+
+
+def generate_with_aigen_interactive():
+    """Interactive Imagen 3 image generation."""
+    
+    print(f"\n{'─'*60}")
+    print("GENERATE WITH AIGEN 3 ($0.04)")
+    print('─'*60)
+    
+    prompt = input("\nEnter image description (or 'cancel'): ").strip()
+    if prompt.lower() == "cancel":
+        return
+    
+    # Create safe filename from prompt
+    safe_prompt = "".join([c if c.isalnum() or c in ("-", "_", " ") else "_" for c in prompt])
+    safe_prompt = safe_prompt.strip().replace(" ", "_")[:50]
+    
+    # Check if output file already exists
+    out_path = DIR_AI_GENERATED / f"{safe_prompt}.png"
+    counter = 2
+    while out_path.exists():
+        out_path = DIR_AI_GENERATED / f"{safe_prompt}_{counter}.png"
+        counter += 1
+    
+    try:
+        start_time = time.time()
+        
+        print(f"\nGenerating with Imagen 3 (high quality)...")
+        generate_via_imagen3(prompt, out_path)
+        
+        # Show timing
+        elapsed = time.time() - start_time
+        mins, secs = divmod(int(elapsed), 60)
+        time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
+        
+        print(f"\n{OK} Image saved: {out_path.name}")
+        print(f"   Generation time: {time_str}")
+        print(f"   Cost: ~$0.04")
+        print(f"   Saved to: AI_files/{out_path.name}")
+        
+    except Exception as e:
+        print(f"\n{ERR} Image generation failed: {e}")
+    
+    input("\nPress Enter to continue...")
         
 
 def run_marigold_cli(image_path: Path, depth_out: Path, marigold_opts: dict):
     """Run marigold_cli.py to create a 16-bit depth PNG."""
     marigold_model_path = HERE / ".." / "models" / "marigold_model"
     if not marigold_model_path.exists():
-        raise RuntimeError(f"Marigold model not found at {marigold_model_path}. Please run download_model.py first.")
+        raise RuntimeError(f"Marigold model not found at {marigold_model_path}.")
 
     cmd = ["python", str(MARIGOLD_CLI),
            "--input", str(image_path),
@@ -404,13 +494,17 @@ def run_marigold_cli(image_path: Path, depth_out: Path, marigold_opts: dict):
     else:
         cmd.append("--no-match_input_res")
     
-    # Add checkpoint flags
     if marigold_opts.get("marigold_save_checkpoints", False):
         cmd.append("--save_checkpoints")
     
     if marigold_opts.get("marigold_resume", False):
         cmd.append("--resume")
-        
+    
+    # ADD THIS: Show exact command for manual testing
+    print(f"\n💻 Marigold command:")
+    print(f"   {' '.join(cmd)}")
+    print()
+    
     full = conda_prefix_cmd(MARIGOLD_ENV, cmd)
     
     print(f"\nGenerating depth map from {image_path.name}...")
@@ -472,6 +566,11 @@ def run_marigold_with_regions(image_path: Path, depth_out: Path, config: dict):
         use_sam=region_config.get('use_sam', True),
         detection_mode=detection_mode
     )
+
+    # Add prompt settings if using prompt mode
+    if detection_mode == 'prompt':
+        detector.detection_prompt = region_config.get('detection_prompt', 'animal face')
+        detector.prompt_confidence = region_config.get('prompt_confidence', 0.25)
     
     regions = detector.create_region_masks(
         str(working_image),
@@ -503,7 +602,7 @@ def run_marigold_with_regions(image_path: Path, depth_out: Path, config: dict):
         face_settings = region_config['face']
         
         depth = processor.process_region(
-            image_path=image_path,
+            image_path=working_image,
             mask=face_mask,
             region_name=region_name,
             preprocess_settings=face_settings['preprocessing'],
@@ -518,7 +617,7 @@ def run_marigold_with_regions(image_path: Path, depth_out: Path, config: dict):
     # Process background
     bg_settings = region_config['background']
     bg_depth = processor.process_region(
-        image_path=image_path,
+        image_path=working_image,
         mask=regions['background'],
         region_name="background",
         preprocess_settings=bg_settings['preprocessing'],
@@ -574,6 +673,11 @@ def run_extrude_cli(depth_path: Path, stl_out: Path, extrude_params: dict):
            "--prepare_for_3d_printing", str(extrude_params.get("prepare_for_3d_printing", False)),
            "--zip_outputs", str(extrude_params.get("zip_outputs", False))]
 
+    # Print extrude_cli.py command to window for the user
+    print(f"\n💻 Extrusion command:")
+    print(f"   {' '.join(cmd)}")
+    print()
+
     full = conda_prefix_cmd(DEPTH_ENV, cmd)
     
     print(f"\nConverting depth map to 3D model...")
@@ -583,16 +687,6 @@ def run_extrude_cli(depth_path: Path, stl_out: Path, extrude_params: dict):
         last_lines = "\n".join(output.splitlines()[-5:])
         raise RuntimeError(f"3D extrusion failed.\n\nLast output from script:\n{last_lines}")
     return stl_out
-
-
-def list_2d_files():
-    """List all valid image files in 2D_files directory."""
-    valid_extensions = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"}
-    files = []
-    for p in DIR_2D.iterdir():
-        if p.is_file() and p.suffix.lower() in valid_extensions:
-            files.append(p)
-    return sorted(files)
     
 
 def process_single(image_path: Path, marigold_opts: dict, extrude_opts: dict, file_counter=None, quality_preset="high"):
@@ -624,23 +718,47 @@ def process_single(image_path: Path, marigold_opts: dict, extrude_opts: dict, fi
         else:
             # Copy original to output folder
             shutil.copy2(image_path, run_dir / image_path.name)
-        
+
         # Define output paths
         depth_out = run_dir / f"{name_with_quality}_depth_16bit.png"
 
-        # STEP 2: Run Marigold and use regional processing if enabled
-        if cfg.get('region_processing', {}).get('enabled', False):
-            run_marigold_with_regions(working_image, depth_out, cfg)
+        # STEP 2: Prepare image for Marigold (composite transparent images onto neutral background)
+        if REMOVE_BACKGROUND:
+            prepared_path = run_dir / f"{name_with_quality}_prepared.png"
+            
+            # Open image
+            img = Image.open(working_image)
+            
+            # Check if has alpha channel
+            if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+                print(f"  Compositing onto neutral background for Marigold...")
+                
+                # Convert to RGBA
+                if img.mode != 'RGBA':
+                    img = img.convert('RGBA')
+                
+                # Create gray background (neutral for depth)
+                background = Image.new('RGBA', img.size, (128, 128, 128, 255))
+                
+                # Composite
+                composited = Image.alpha_composite(background, img)
+                
+                # Convert to RGB
+                rgb_img = composited.convert('RGB')
+                rgb_img.save(prepared_path)
+                
+                marigold_input = prepared_path
+                print(f"  ✓ Prepared: {prepared_path.name}")
+            else:
+                marigold_input = working_image
         else:
-            run_marigold_cli(working_image, depth_out, marigold_opts)
+            marigold_input = working_image
 
-        # STEP 3: Mask depth map with alpha channel (remove background from depth)
-        if REMOVE_BACKGROUND and working_image.suffix.lower() == '.png':
-            try:
-                mask_depth_with_alpha(depth_out, working_image)
-            except Exception as e:
-                print(f"  {WARN} Could not mask depth map: {e}")
-                print(f"  {WARN} Continuing with unmasked depth...")
+        # STEP 3: Run Marigold (with regional processing if enabled)
+        if cfg.get('region_processing', {}).get('enabled', False):
+            run_marigold_with_regions(marigold_input, depth_out, cfg)
+        else:
+            run_marigold_cli(marigold_input, depth_out, marigold_opts)
 
         # STEP 4: Run extrusion
         stl_out = run_dir / f"{name_with_quality}.stl"
@@ -687,28 +805,69 @@ def process_single(image_path: Path, marigold_opts: dict, extrude_opts: dict, fi
         traceback.print_exc()
 
 
-def select_and_process_single(preset_key: str):
-    """Helper function to list files, prompt for selection, and process one image."""
-    files = list_2d_files()
+def select_and_process(quality_preset):
+    """
+    Select source (AI or photo) and process with specified quality.
+    """
+    
+    print(f"\n{'─'*60}")
+    print(f"SELECT IMAGE SOURCE")
+    print('─'*60)
+    print("  1. From AI_files/ folder")
+    print("  2. From Photos/ folder (will auto-enhance)")
+    print("  3. Back")
+    print('─'*60)
+    
+    source_choice = input("\nSelect source [1-3]: ").strip()
+    
+    if source_choice == "1":
+        source_dir = DIR_AI_GENERATED
+        auto_enhance = False
+        print(f"\n📁 Scanning: {source_dir.relative_to(HERE.parent)}")
+    elif source_choice == "2":
+        source_dir = DIR_PHOTOS
+        auto_enhance = cfg.get("auto_enhance_photos", True)
+        print(f"\n📁 Scanning: {source_dir.relative_to(HERE.parent)}")
+    elif source_choice == "3":
+        return
+    else:
+        print(f"\n{ERR} Invalid option.")
+        return
+    
+    # List available images
+    files = list_image_files(source_dir)
+    
     if not files:
-        print("\nNo images found in 2D_files/.")
+        print(f"\n{WARN} No images found in {source_dir.name}/")
+        print(f"       Path checked: {source_dir}")
+        if source_choice == "1":
+            print(f"       Generate AI images first (Main Menu → Option 1)")
+        else:
+            print(f"       Add photos to: {source_dir}")
+        input("\nPress Enter to continue...")
         return
     
-    print("\nAvailable images:")
-    for i, p in enumerate(files, start=1):
-        print(f"  {i}) {p.name}")
+    print(f"\nAvailable images in {source_dir.name}/:")
+    for i, file_path in enumerate(files, 1):
+        print(f"  {i}. {file_path.name}")
     
-    sel = input(f"\nPick file [1-{len(files)}] or 'c' to cancel: ").strip()
-    if sel.lower() == "c":
-        return
+    print(f"  {len(files) + 1}. Back")
     
     try:
-        target = files[int(sel) - 1]
-        preset = MARIGOLD_PRESETS[preset_key]
-        print(f"\nProcessing '{target.name}' with '{preset_key}' preset...")
-        process_single(target, preset, EXTRUDE_DEFAULTS, quality_preset=preset_key)  # PASS PRESET NAME
-    except (ValueError, IndexError):
-        print("Invalid selection.")
+        choice = input(f"\nSelect image [1-{len(files) + 1}]: ").strip()
+        choice_num = int(choice)
+        
+        if choice_num == len(files) + 1:
+            return
+        
+        if 1 <= choice_num <= len(files):
+            image_path = files[choice_num - 1]
+            process_single_image(image_path, quality_preset, auto_enhance)
+        else:
+            print(f"\n{ERR} Invalid selection.")
+    
+    except ValueError:
+        print(f"\n{ERR} Invalid input.")
 
 
 def view_edit_defaults():
@@ -748,280 +907,657 @@ def view_edit_defaults():
     input("\nPress Enter to return to the main menu after editing.")
 
 
-def interactive_loop():
-    print(f"\n{'='*60}\n  Marigold -> Depth-to-3D Pipeline\n{'='*60}")
+def main_menu():
+    """Simplified main menu with logical grouping."""
+    
+    print(f"\n{'='*60}")
+    print(f"  2D to 3D Pipeline - Bas-Relief Generator")
+    print(f"{'='*60}")
     
     while True:
-        print("\n" + "-"*60 + "\nMENU:")
-        print("  1) Generate new image (basic quality)")
-        print("  2) Generate new image (high quality, Imagen 3)")
-        print("  3) Enhance photos (auto-detect settings)")           # NEW
-        print("  4) Enhance single photo (preview)")                  # NEW
-        print("  5) Batch process all images (high quality)")
-        print("  6) Process single image (low quality)")
-        print("  7) Process single image (medium quality)")
-        print("  8) Process single image (high quality)")
-        print("  9) Edit default parameters (opens config.yaml)")
-        print(" 10) Quit\n" + "-"*60)
+        print("\n" + "-"*60)
+        print("MAIN MENU:")
+        print("-"*60)
+        print("  1. Generate AI Image")
+        print("  2. Transform 2D to 3D")
+        print("  3. Rerun Depth-to-Model (new settings)")
+        print("  4. Edit Configuration")
+        print("  5. Quit")
+        print("-"*60)
         
-        choice = input("Select option [1-10]: ").strip()
+        choice = input("\nSelect option [1-5]: ").strip()
         
         if choice == "1":
-            generate_image_interactive(use_high_quality=False)
-                
+            generate_ai_image_menu()
         elif choice == "2":
-            generate_image_interactive(use_high_quality=True)
-            
+            transform_2d_to_3d_menu()
         elif choice == "3":
-            enhance_photos_batch()
-            
+            rerun_depth_to_model_menu()
         elif choice == "4":
-            enhance_single_photo_interactive()
-            
+            edit_configuration()
         elif choice == "5":
-            files = list_2d_files()
-            if not files:
-                print("No images found. Generate or enhance some first.")
-                continue
-            
-            print(f"\nFound {len(files)} image(s). Processing with 'high_quality' preset.")
-            batch_start = time.time()
-            for i, p in enumerate(files, start=1):
-                process_single(p, MARIGOLD_PRESETS['high_quality'], EXTRUDE_DEFAULTS, f"{i}/{len(files)}", quality_preset="high")  # ADD QUALITY
-            
-            mins, secs = divmod(int(time.time() - batch_start), 60)
-            print(f"\n{'='*60}\n{OK} BATCH COMPLETE: Processed {len(files)} file(s) in {mins}m {secs}s\n{'='*60}")
-            
-        elif choice == "6":
-            select_and_process_single('low_quality')
-            
-        elif choice == "7":
-            select_and_process_single('medium_quality')
-            
-        elif choice == "8":
-            select_and_process_single('high_quality')
-
-        elif choice == "9":
-            view_edit_defaults()
-            
-        elif choice == "10":
-            print("\nExiting. Goodbye!")
+            print("\n👋 Goodbye!")
             break
         else:
-            print("\nInvalid option.")
+            print(f"\n{ERR} Invalid option. Please choose 1-5.")
 
 
-def enhance_photos_batch():
-    """
-    Enhance all photos in 2D_files using automatic detection.
-    Includes background removal if enabled in config.
-    """
-    from photo_analyzer import analyze_photo
+def generate_ai_image_menu():
+    """Submenu for AI image generation."""
     
-    files = list_2d_files()
-    if not files:
-        print("\nNo images found in 2D_files/.")
+    print(f"\n{'─'*60}")
+    print("GENERATE AI IMAGE")
+    print('─'*60)
+    print("  1. Gemini (FREE, basic quality)")
+    print("  2. Imagen ($0.04, high quality)")
+    print("  3. Back to main menu")
+    print('─'*60)
+    
+    choice = input("\nSelect option [1-3]: ").strip()
+    
+    if choice == "1":
+        generate_with_gemini_interactive()
+    elif choice == "2":
+        generate_with_aigen_interactive()
+    elif choice == "3":
         return
-    
-    print(f"\n{'='*60}")
-    print(f"  Photo Enhancement - Automatic Detection")
-    print(f"{'='*60}")
-    
-    if REMOVE_BACKGROUND:
-        print(f"  Background removal: ENABLED")
     else:
-        print(f"  Background removal: DISABLED")
-    
-    print(f"\nFound {len(files)} image(s) to enhance.\n")
-    
-    batch_start = time.time()
-    
-    # Create enhanced directory
-    enhanced_dir = DIR_2D.parent / "data" / "2D_files_enhanced"
-    enhanced_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Create log file
-    log_path = enhanced_dir / "enhancement_log.txt"
-    
-    with open(log_path, 'w') as log:
-        log.write("Photo Enhancement Log\n")
-        log.write("="*60 + "\n\n")
-        
-        for i, img_path in enumerate(files, 1):
-            print(f"[{i}/{len(files)}] Processing: {img_path.name}")
-            
-            try:
-                # STEP 1: Remove background if enabled
-                working_image = img_path
-                if REMOVE_BACKGROUND:
-                    nobg_path = enhanced_dir / f"{img_path.stem}_nobg_temp.png"
-                    working_image = remove_background_if_enabled(img_path, nobg_path)
-                
-                # STEP 2: Analyze photo
-                settings, reasons, cmd = analyze_photo(str(working_image), verbose=False)
-                
-                # Show brief analysis
-                print(f"  Detected: {settings['preset']} enhancement needed")
-                for reason in reasons[:2]:  # Show top 2 reasons
-                    print(f"    • {reason}")
-                
-                # STEP 3: Enhance photo
-                output_path = enhanced_dir / f"{img_path.stem}_enhanced.png"
-                
-                from photo_preprocess import preprocess_photo
-                
-                preprocess_photo(
-                    str(working_image),
-                    str(output_path),
-                    preset=settings['preset'],
-                    denoise_strength=settings['denoise_strength'],
-                    use_hdr=settings['use_hdr'],
-                    clahe_clip=settings['clahe_clip'],
-                    sharpen_percent=settings['sharpen_percent'],
-                    saturation=settings['saturation'],
-                    enhance_details=settings['detail_amount'] if settings['use_detail_enhancement'] else 0,
-                    save_intermediate=False
-                )
-                
-                print(f"  {OK} Enhanced: {output_path.name}")
-                print(f"  To manually adjust: {cmd}\n")
-                
-                # Log the command
-                log.write(f"File: {img_path.name}\n")
-                log.write(f"Background removed: {REMOVE_BACKGROUND}\n")
-                log.write(f"Settings: {settings['preset']}\n")
-                log.write(f"Command: {cmd}\n")
-                log.write("-" * 60 + "\n\n")
-                
-                # Clean up temp nobg file
-                if REMOVE_BACKGROUND and working_image != img_path and working_image.exists():
-                    working_image.unlink()
-                
-            except Exception as e:
-                print(f"  {ERR} Failed: {e}\n")
-                import traceback
-                traceback.print_exc()
-                log.write(f"File: {img_path.name}\n")
-                log.write(f"ERROR: {e}\n")
-                log.write("-" * 60 + "\n\n")
-    
-    # Show total time
-    elapsed = time.time() - batch_start
-    mins, secs = divmod(int(elapsed), 60)
-    time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
-    
-    print(f"\n{OK} Enhancement complete!")
-    print(f"   Total time: {time_str}")
-    print(f"   Enhanced images: {enhanced_dir}")
-    print(f"   Settings log: {log_path}")
-    print(f"\nNext steps:")
-    print(f"  1. Review enhanced images in: {enhanced_dir.name}/")
-    print(f"  2. If satisfied, move them to 2D_files/ and delete originals")
-    print(f"  3. If adjustments needed, use commands from: {log_path.name}")
-    print(f"  4. Run main pipeline to process enhanced images\n")
+        print(f"\n{ERR} Invalid option.")
+        generate_ai_image_menu()
 
 
-def enhance_single_photo_interactive():
-    """
-    Enhance a single photo with interactive selection.
-    Includes background removal if enabled in config.
-    """
-    from photo_analyzer import analyze_photo
-    from photo_preprocess import preprocess_photo
+def generate_with_gemini_interactive():
+    """Interactive Gemini image generation."""
     
-    files = list_2d_files()
-    if not files:
-        print("\nNo images found in 2D_files/.")
+    print(f"\n{'─'*60}")
+    print("GENERATE WITH GEMINI (FREE)")
+    print('─'*60)
+    
+    prompt = input("\nEnter image description (or 'cancel'): ").strip()
+    if prompt.lower() == "cancel":
         return
     
-    print("\nAvailable images:")
-    for i, p in enumerate(files, start=1):
-        print(f"  {i}) {p.name}")
+    # Create safe filename from prompt
+    safe_prompt = "".join([c if c.isalnum() or c in ("-", "_", " ") else "_" for c in prompt])
+    safe_prompt = safe_prompt.strip().replace(" ", "_")[:50]
     
-    sel = input(f"\nPick file [1-{len(files)}] or 'c' to cancel: ").strip()
-    if sel.lower() == 'c':
-        return
+    # Check if output file already exists
+    out_path = DIR_AI_GENERATED / f"{safe_prompt}.png"
+    counter = 2
+    while out_path.exists():
+        out_path = DIR_AI_GENERATED / f"{safe_prompt}_{counter}.png"
+        counter += 1
     
     try:
-        img_path = files[int(sel) - 1]
-    except (ValueError, IndexError):
-        print("Invalid selection.")
-        return
-    
-    print(f"\n{'='*60}")
-    print(f"  Analyzing: {img_path.name}")
-    print(f"{'='*60}")
-    
-    if REMOVE_BACKGROUND:
-        print(f"  Background removal: ENABLED")
-    else:
-        print(f"  Background removal: DISABLED")
-    
-    start_time = time.time()
-    
-    try:
-        # STEP 1: Remove background if enabled
-        working_image = img_path
-        if REMOVE_BACKGROUND:
-            nobg_path = img_path.parent / f"{img_path.stem}_nobg_temp.png"
-            working_image = remove_background_if_enabled(img_path, nobg_path)
+        start_time = time.time()
         
-        # STEP 2: Analyze with full output
-        settings, reasons, cmd = analyze_photo(str(working_image), verbose=True)
+        print(f"\nGenerating with Gemini (FREE tier)...")
+        generate_via_gemini(prompt, out_path)
         
-        # Ask for confirmation
-        confirm = input("\nProceed with these settings? [Y/n]: ").strip().lower()
-        if confirm and confirm not in ['y', 'yes']:
-            print("Enhancement cancelled.")
-            # Clean up temp file
-            if REMOVE_BACKGROUND and working_image != img_path and working_image.exists():
-                working_image.unlink()
-            return
-        
-        # STEP 3: Enhance
-        output_path = img_path.parent / f"{img_path.stem}_enhanced.png"
-        
-        print(f"\nEnhancing...")
-        preprocess_photo(
-            str(working_image),
-            str(output_path),
-            preset=settings['preset'],
-            denoise_strength=settings['denoise_strength'],
-            use_hdr=settings['use_hdr'],
-            clahe_clip=settings['clahe_clip'],
-            sharpen_percent=settings['sharpen_percent'],
-            saturation=settings['saturation'],
-            enhance_details=settings['detail_amount'] if settings['use_detail_enhancement'] else 0,
-            save_intermediate=False
-        )
-        
-        # Clean up temp nobg file
-        if REMOVE_BACKGROUND and working_image != img_path and working_image.exists():
-            working_image.unlink()
-        
+        # Show timing
         elapsed = time.time() - start_time
         mins, secs = divmod(int(elapsed), 60)
         time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
         
-        print(f"\n{OK} Enhanced image saved: {output_path.name}")
-        print(f"   Enhancement time: {time_str}")
-        if REMOVE_BACKGROUND:
-            print(f"   Background: Removed (transparent)")
-        print(f"\nTo adjust manually:")
-        print(f"  {cmd}\n")
+        print(f"\n{OK} Image saved: {out_path.name}")
+        print(f"   Generation time: {time_str}")
         
     except Exception as e:
-        print(f"\n{ERR} Enhancement failed: {e}")
-        import traceback
-        traceback.print_exc()
-        # Clean up temp file on error
-        if REMOVE_BACKGROUND and 'working_image' in locals() and working_image != img_path and working_image.exists():
-            working_image.unlink()
+        print(f"\n{ERR} Image generation failed: {e}")
+    
+    input("\nPress Enter to continue...")
+
+
+def generate_with_aigen_interactive():
+    """Interactive Imagen 3 image generation."""
+    
+    print(f"\n{'─'*60}")
+    print("GENERATE WITH AIGEN 3 ($0.04)")
+    print('─'*60)
+    
+    prompt = input("\nEnter image description (or 'cancel'): ").strip()
+    if prompt.lower() == "cancel":
+        return
+    
+    # Create safe filename from prompt
+    safe_prompt = "".join([c if c.isalnum() or c in ("-", "_", " ") else "_" for c in prompt])
+    safe_prompt = safe_prompt.strip().replace(" ", "_")[:50]
+    
+    # Check if output file already exists
+    out_path = DIR_AI_GENERATED / f"{safe_prompt}.png"
+    counter = 2
+    while out_path.exists():
+        out_path = DIR_AI_GENERATED / f"{safe_prompt}_{counter}.png"
+        counter += 1
+    
+    try:
+        start_time = time.time()
+        
+        print(f"\nGenerating with Imagen 3 (high quality)...")
+        generate_via_imagen3(prompt, out_path)
+        
+        # Show timing
+        elapsed = time.time() - start_time
+        mins, secs = divmod(int(elapsed), 60)
+        time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
+        
+        print(f"\n{OK} Image saved: {out_path.name}")
+        print(f"   Generation time: {time_str}")
+        print(f"   Cost: ~$0.04")
+        
+    except Exception as e:
+        print(f"\n{ERR} Image generation failed: {e}")
+    
+    input("\nPress Enter to continue...")
+
+
+def transform_2d_to_3d_menu():
+    """Submenu for 2D to 3D transformation."""
+    
+    print(f"\n{'─'*60}")
+    print("TRANSFORM 2D TO 3D")
+    print('─'*60)
+    print("  1. Low Quality (fast, ~2 min)")
+    print("  2. Medium Quality (balanced, ~5 min)")
+    print("  3. High Quality (best, ~10 min)")
+    print("  4. Batch Process Folder")
+    print("  5. Back to main menu")
+    print('─'*60)
+    
+    choice = input("\nSelect option [1-5]: ").strip()
+    
+    if choice in ["1", "2", "3"]:
+        quality = ["low_quality", "medium_quality", "high_quality"][int(choice) - 1]
+        select_and_process(quality)
+    elif choice == "4":
+        batch_process_folder(quality="high_quality")
+    elif choice == "5":
+        return
+    else:
+        print(f"\n{ERR} Invalid option.")
+        transform_2d_to_3d_menu()
+
+
+def rerun_depth_to_model_menu():
+    """
+    Reprocess existing depth maps with new extrusion settings.
+    Useful for fine-tuning without regenerating depth.
+    """
+    
+    print(f"\n{'─'*60}")
+    print("RERUN DEPTH-TO-MODEL")
+    print('─'*60)
+    print("This will reprocess an existing depth map with new settings.")
+    print("Useful for adjusting relief height, smoothing, etc.")
+    print('─'*60)
+    
+    # Find all depth maps in 3D_files
+    depth_maps = []
+    for project_dir in DIR_3D.iterdir():
+        if project_dir.is_dir():
+            for depth_file in project_dir.glob("*_depth_16bit.png"):
+                depth_maps.append(depth_file)
+    
+    if not depth_maps:
+        print(f"\n{WARN} No depth maps found. Generate 3D models first (option 2).")
+        input("\nPress Enter to continue...")
+        return
+    
+    print(f"\nFound {len(depth_maps)} depth map(s):")
+    for i, depth_path in enumerate(depth_maps, 1):
+        project_name = depth_path.parent.name
+        print(f"  {i}. {project_name}")
+    
+    print(f"  {len(depth_maps) + 1}. Back to main menu")
+    
+    try:
+        choice = input(f"\nSelect depth map [1-{len(depth_maps) + 1}]: ").strip()
+        choice_num = int(choice)
+        
+        if choice_num == len(depth_maps) + 1:
+            return
+        
+        if 1 <= choice_num <= len(depth_maps):
+            depth_path = depth_maps[choice_num - 1]
+            
+            # Ask if they want to edit settings first
+            print(f"\nCurrent settings in config.yaml will be used.")
+            edit = input("Edit settings now? [y/N]: ").strip().lower()
+            
+            if edit in ['y', 'yes']:
+                edit_configuration()
+            
+            # Rerun extrusion with current config
+            reprocess_depth_map(depth_path)
+        else:
+            print(f"\n{ERR} Invalid selection.")
+    
+    except ValueError:
+        print(f"\n{ERR} Invalid input.")
+
+
+def select_and_process(quality_preset):
+    """
+    Select source (AI or photo) and process with specified quality.
+    """
+    
+    print(f"\n{'─'*60}")
+    print(f"SELECT IMAGE SOURCE")
+    print('─'*60)
+    print("  1. From AI_files/ folder")
+    print("  2. From photos/ folder (will auto-enhance)")
+    print("  3. Back")
+    print('─'*60)
+    
+    source_choice = input("\nSelect source [1-3]: ").strip()
+    
+    if source_choice == "1":
+        source_dir = DIR_AI_GENERATED
+        auto_enhance = False
+    elif source_choice == "2":
+        source_dir = DIR_PHOTOS
+        auto_enhance = cfg.get("auto_enhance_photos", True)
+    elif source_choice == "3":
+        return
+    else:
+        print(f"\n{ERR} Invalid option.")
+        return
+    
+    # List available images
+    files = list_image_files(source_dir)
+    
+    if not files:
+        print(f"\n{WARN} No images found in {source_dir.name}/")
+        print(f"       Generate AI images or add photos first.")
+        input("\nPress Enter to continue...")
+        return
+    
+    print(f"\nAvailable images in {source_dir.name}/:")
+    for i, file_path in enumerate(files, 1):
+        print(f"  {i}. {file_path.name}")
+    
+    print(f"  {len(files) + 1}. Back")
+    
+    try:
+        choice = input(f"\nSelect image [1-{len(files) + 1}]: ").strip()
+        choice_num = int(choice)
+        
+        if choice_num == len(files) + 1:
+            return
+        
+        if 1 <= choice_num <= len(files):
+            image_path = files[choice_num - 1]
+            process_single_image(image_path, quality_preset, auto_enhance)
+        else:
+            print(f"\n{ERR} Invalid selection.")
+    
+    except ValueError:
+        print(f"\n{ERR} Invalid input.")
+
+
+def process_single_image(image_path, quality_preset, auto_enhance=False):
+    """
+    Main processing pipeline for single image.
+    
+    Args:
+        image_path: Path to source image
+        quality_preset: "low_quality", "medium_quality", or "high_quality"
+        auto_enhance: Apply photo enhancement before processing
+    """
+    
+    start_time = time.time()
+    
+    print(f"\n{'='*60}")
+    print(f"  Processing: {image_path.name}")
+    print(f"  Quality: {quality_preset.replace('_', ' ').title()}")
+    print(f"{'='*60}")
+    
+    # Create output directory with UNIQUE name
+    project_name = safe_name_from_file(image_path)
+    output_dir = DIR_3D / f"{project_name}_{quality_preset}"
+    
+    # Ensure unique folder (add _2, _3, etc. if exists)
+    counter = 2
+    while output_dir.exists():
+        output_dir = DIR_3D / f"{project_name}_{quality_preset}_{counter}"
+        counter += 1
+    
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"  📁 Output folder: {output_dir.name}")
+    
+    # STEP 1: Photo enhancement (if from photos/ folder)
+    working_image = image_path
+    
+    if auto_enhance:
+        print(f"\n📸 Auto-enhancing photo...")
+        enhanced_path = DIR_ENHANCED / f"{image_path.stem}_enhanced.png"
+        
+        # Check if already enhanced
+        if enhanced_path.exists():
+            print(f"   Using cached enhanced version")
+            working_image = enhanced_path
+        else:
+            # Enhance and cache
+            from photo_preprocess import preprocess_photo
+            preset = cfg.get("auto_enhance_preset", "minimal")
+            
+            preprocess_photo(
+                str(image_path),
+                str(enhanced_path),
+                preset=preset,
+                save_intermediate=False
+            )
+            working_image = enhanced_path
+            print(f"   {OK} Enhanced and cached")
+    
+    # STEP 2: Background removal
+    if REMOVE_BACKGROUND:
+        print(f"\n🎭 Removing background...")
+        nobg_path = output_dir / f"{project_name}_nobg.png"
+        working_image = remove_background_if_enabled(working_image, nobg_path)
+        print(f"  DEBUG: After bg removal, working_image = {working_image.name}")
+    
+    # Copy source to output
+    shutil.copy2(working_image, output_dir / "source.png")
+    
+    # STEP 3: Prepare for Marigold (composite transparent images)
+    marigold_input = working_image
+    
+    if REMOVE_BACKGROUND:
+        # Check if image has transparency
+        img = Image.open(working_image)
+        
+        if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+            print(f"  Compositing transparent image onto neutral background...")
+            
+            # Convert to RGBA if needed
+            if img.mode != 'RGBA':
+                img = img.convert('RGBA')
+            
+            # Create neutral gray background (128, 128, 128)
+            background = Image.new('RGB', img.size, (128, 128, 128))
+            
+            # Paste image onto background using alpha as mask
+            background.paste(img, (0, 0), img)
+            
+            # VERIFY it's RGB and has valid data
+            print(f"  DEBUG: Composited image mode: {background.mode}")
+            print(f"  DEBUG: Composited image size: {background.size}")
+            arr = np.array(background)
+            print(f"  DEBUG: Pixel value range: {arr.min()} - {arr.max()}")
+            print(f"  DEBUG: Mean pixel value: {arr.mean():.1f}")
+            
+            # Save composited version - ENSURE IT'S RGB
+            prepared_path = output_dir / f"{project_name}_prepared_for_marigold.png"
+            background.save(prepared_path, 'PNG')
+            
+            # VERIFY the saved file
+            verify = Image.open(prepared_path)
+            print(f"  DEBUG: Saved file mode: {verify.mode}")
+            print(f"  DEBUG: Saved file size: {verify.size}")
+            
+            marigold_input = prepared_path
+            print(f"  ✓ Prepared: {prepared_path.name}")
+    
+    print(f"\n  ➡️ FINAL marigold_input = {marigold_input.name}")
+
+    # STEP 4: Generate depth map
+    depth_path = output_dir / f"{project_name}_depth_16bit.png"
+    marigold_opts = MARIGOLD_PRESETS[quality_preset]
+    
+    # DEBUG: Show what image is being sent to Marigold
+    print(f"\n🔍 DEBUG INFO:")
+    print(f"   Marigold input: {marigold_input.name}")
+    print(f"   Input mode: {Image.open(marigold_input).mode}")
+    print(f"   Input size: {Image.open(marigold_input).size}")
+    
+    # Use regional processing if enabled, otherwise standard
+    if cfg.get('region_processing', {}).get('enabled', False):
+        run_marigold_with_regions(marigold_input, depth_path, cfg)
+    else:
+        run_marigold_cli(marigold_input, depth_path, marigold_opts)
+    
+    
+   # STEP 6: Extrude to 3D model
+    stl_raw_path = output_dir / f"{project_name}_raw.stl"
+    run_extrude_cli(depth_path, stl_raw_path, EXTRUDE_DEFAULTS)
+    
+    # STEP 7: Advanced post-processing (if enabled)
+    if cfg.get("enable_advanced_postprocessing", False):
+        print(f"\n✨ Applying advanced post-processing...")
+        
+        from mesh_postprocess_advanced import advanced_postprocess_pipeline
+        
+        stl_final_path = output_dir / f"{project_name}_final.stl"
+        
+        pp_settings = cfg.get("postprocessing_settings", {})
+        
+        advanced_postprocess_pipeline(
+            str(stl_raw_path),
+            str(stl_final_path),
+            relief_height_mm=pp_settings.get("relief_height_mm", 10.0),
+            base_thickness_mm=pp_settings.get("base_thickness_mm", 2.0),
+            target_faces=pp_settings.get("target_faces", 50000),
+            smoothing_iterations=pp_settings.get("smoothing_iterations", 2),
+            repair=pp_settings.get("repair_mesh", True)
+        )
+        
+        print(f"\n{OK} Post-processing complete!")
+        print(f"   Raw model:   {stl_raw_path.name}")
+        print(f"   Final model: {stl_final_path.name}")
+    else:
+        stl_final_path = stl_raw_path
+        print(f"\n Post-processing disabled (enable in config.yaml)")
+    
+    # STEP 8: Export additional formats (if enabled)
+    export_formats = cfg.get("export_formats", {"stl": True, "glb": False, "obj": False})
+    
+    if export_formats.get("glb", False) or export_formats.get("obj", False):
+        import trimesh
+        mesh = trimesh.load(stl_final_path)
+        
+        if export_formats.get("glb", False):
+            glb_path = output_dir / f"{project_name}.glb"
+            mesh.export(glb_path, file_type="glb")
+            print(f"   Exported: {glb_path.name}")
+        
+        if export_formats.get("obj", False):
+            obj_path = output_dir / f"{project_name}.obj"
+            mesh.export(obj_path, file_type="obj")
+            print(f"   Exported: {obj_path.name}")
+    
+    # Calculate total time
+    elapsed = time.time() - start_time
+    mins, secs = divmod(int(elapsed), 60)
+    time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
+    
+    print(f"\n{'='*60}")
+    print(f"{OK} COMPLETE!")
+    print(f"   Output: {output_dir.name}/")
+    print(f"   Total time: {time_str}")
+    print(f"{'='*60}")
+    
+    # Clean up source file if configured
+    if cfg.get("delete_source_after_processing", False):
+        try:
+            image_path.unlink()
+            print(f"   {TRASH} Deleted source file")
+        except:
+            pass
+    
+    input("\nPress Enter to continue...")
+
+
+def reprocess_depth_map(depth_path):
+    """
+    Rerun extrusion + post-processing on existing depth map.
+    """
+    
+    print(f"\n{'='*60}")
+    print(f"  Reprocessing: {depth_path.parent.name}")
+    print(f"{'='*60}")
+    
+    output_dir = depth_path.parent
+    project_name = depth_path.parent.name
+    
+    global cfg, EXTRUDE_DEFAULTS
+    with open(CONFIG_PATH, 'r') as f:
+        cfg = yaml.safe_load(f)
+    EXTRUDE_DEFAULTS = cfg.get("extrude_defaults", {})
+    print(f"✓ Loaded latest extrusion settings from config.yaml")
+
+    # Find source image
+    source_candidates = list(output_dir.glob("source.*"))
+    source_image = source_candidates[0] if source_candidates else None
+    
+    # Extrude
+    stl_raw_path = output_dir / f"{project_name}_raw_v2.stl"
+    run_extrude_cli(depth_path, stl_raw_path, EXTRUDE_DEFAULTS)
+    
+    # Post-process if enabled
+    if cfg.get("enable_advanced_postprocessing", False):
+        stl_final_path = output_dir / f"{project_name}_final_v2.stl"
+        
+        from mesh_postprocess_advanced import advanced_postprocess_pipeline
+        pp_settings = cfg.get("postprocessing_settings", {})
+        
+        advanced_postprocess_pipeline(
+            str(stl_raw_path),
+            str(stl_final_path),
+            **pp_settings
+        )
+        
+        print(f"\n{OK} Reprocessing complete!")
+        print(f"   New models saved with '_v2' suffix")
+    else:
+        print(f"\n{OK} Reprocessing complete!")
+        print(f"   New model: {stl_raw_path.name}")
+    
+    input("\nPress Enter to continue...")
+
+
+def batch_process_folder(quality="high_quality"):
+    """
+    Process all images in selected folder.
+    """
+    
+    print(f"\n{'─'*60}")
+    print("BATCH PROCESS")
+    print('─'*60)
+    print("  1. Process all AI_files/")
+    print("  2. Process all Photos/ (with enhancement)")
+    print("  3. Back")
+    print('─'*60)
+    
+    choice = input("\nSelect [1-3]: ").strip()
+    
+    if choice == "1":
+        source_dir = DIR_AI_GENERATED
+        auto_enhance = False
+        print(f"\n📁 Batch processing: {source_dir.relative_to(HERE.parent)}")
+    elif choice == "2":
+        source_dir = DIR_PHOTOS
+        auto_enhance = True
+        print(f"\n📁 Batch processing: {source_dir.relative_to(HERE.parent)}")
+    elif choice == "3":
+        return
+    else:
+        print(f"\n{ERR} Invalid option.")
+        return
+    
+    files = list_image_files(source_dir)
+    
+    if not files:
+        print(f"\n{WARN} No images found in {source_dir.name}/")
+        input("\nPress Enter to continue...")
+        return
+    
+    print(f"\nFound {len(files)} image(s). Processing with '{quality}' preset...")
+    confirm = input("Continue? [Y/n]: ").strip().lower()
+    
+    if confirm and confirm not in ['y', 'yes']:
+        return
+    
+    batch_start = time.time()
+    
+    for i, image_path in enumerate(files, 1):
+        print(f"\n[{i}/{len(files)}]")
+        try:
+            process_single_image(image_path, quality, auto_enhance)
+        except Exception as e:
+            print(f"{ERR} Failed to process {image_path.name}: {e}")
+            continue
+    
+    # Summary
+    elapsed = time.time() - batch_start
+    mins, secs = divmod(int(elapsed), 60)
+    
+    print(f"\n{'='*60}")
+    print(f"{OK} BATCH COMPLETE")
+    print(f"   Processed: {len(files)} images")
+    print(f"   Total time: {mins}m {secs}s")
+    print(f"{'='*60}")
+    
+    input("\nPress Enter to continue...")
+
+
+def edit_configuration():
+    """Open config.yaml in default editor."""
+    
+    print(f"\n{'─'*60}")
+    print("EDIT CONFIGURATION")
+    print('─'*60)
+    print(f"Opening: {CONFIG_PATH}")
+    print('─'*60)
+    
+    try:
+        if sys.platform == "win32":
+            subprocess.Popen(
+                ['cmd', '/c', 'start', '', str(CONFIG_PATH)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(CONFIG_PATH)])
+        else:
+            subprocess.Popen(["xdg-open", str(CONFIG_PATH)])
+        
+        print(f"{OK} Config opened in default editor.")
+    except Exception as e:
+        print(f"{WARN} Could not open automatically: {e}")
+        print(f"      Please edit manually: {CONFIG_PATH}")
+    
+    input("\nPress Enter when done editing...")
+    
+    # Reload config
+    global cfg
+    with open(CONFIG_PATH, 'r') as f:
+        cfg = yaml.safe_load(f)
+    
+    print(f"{OK} Configuration reloaded.")
+
+
+def list_image_files(directory):
+    """List all valid image files in directory."""
+    valid_extensions = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"}
+    files = []
+    
+    # Make sure directory exists
+    if not directory.exists():
+        print(f"  ⚠️ Directory does not exist: {directory}")
+        return files
+    
+    for p in directory.iterdir():
+        if p.is_file() and p.suffix.lower() in valid_extensions:
+            files.append(p)
+    
+    return sorted(files)
 
 
 if __name__ == "__main__":
     try:
-        interactive_loop()
+        main_menu()
     except KeyboardInterrupt:
-        print("\n\nInterrupted by user. Exiting...")
+        print("\n\n👋 Interrupted by user. Goodbye!")
 

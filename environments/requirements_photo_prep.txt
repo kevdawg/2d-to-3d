@@ -1,5 +1,5 @@
 # Environment: photo-prep
-# Purpose: Photo preprocessing (enhancement, background removal, analysis)
+# Purpose: Photo preprocessing (enhancement, background removal, analysis, ROI detection)
 # Python: 3.10+
 
 # Image processing
@@ -12,7 +12,21 @@ numpy==1.24.3
 rembg==2.0.50
 onnxruntime==1.16.3
 
-# Configuration files (needed by main pipeline)
+# Configuration files
 pyyaml>=6.0
+requests>=2.31.0
 
-requests
+# Regional processing / ROI detection
+torch>=2.0.0
+torchvision>=0.15.0
+git+https://github.com/facebookresearch/segment-anything.git
+
+# Grounding DINO for prompt-based detection
+groundingdino-py>=0.1.0
+# Alternative if above doesn't work:
+# git+https://github.com/IDEA-Research/GroundingDINO.git
+
+# Progress bars
+tqdm>=4.65.0
+
+trimesh>=4.9.0

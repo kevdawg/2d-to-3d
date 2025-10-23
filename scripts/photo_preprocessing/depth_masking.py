@@ -11,7 +11,7 @@ from pathlib import Path
 def mask_depth_with_alpha(depth_path, alpha_source_path, output_path=None):
     """
     Apply alpha mask from source image to depth map.
-    Makes background pixels black (far distance) in depth map.
+    Sets background pixels to 0 (far distance) in depth map.
     
     Args:
         depth_path: Path to depth map (grayscale 16-bit PNG)
@@ -29,68 +29,70 @@ def mask_depth_with_alpha(depth_path, alpha_source_path, output_path=None):
     else:
         output_path = Path(output_path)
     
-    print(f"  Masking depth map with alpha channel...")
+    # Load depth map
+    depth_img = Image.open(depth_path)
+    depth_array = np.array(depth_img)
     
-    try:
-        # Load depth map
-        depth_img = Image.open(depth_path)
-        depth_array = np.array(depth_img)
-        
-        # Store original dtype (should be uint16 for 16-bit depth)
-        original_dtype = depth_array.dtype
-        
-        # Load alpha mask from source
-        source_img = Image.open(alpha_source_path)
-        
-        # Check if source has alpha channel
-        if source_img.mode != 'RGBA':
-            if source_img.mode == 'RGB':
-                # No alpha channel - all pixels are foreground
-                print(f"  ℹ️ Source image has no alpha channel, skipping mask")
-                return depth_path
-            else:
-                # Convert to RGBA to get alpha
-                source_img = source_img.convert('RGBA')
-        
-        # Extract alpha channel
-        alpha = np.array(source_img)[:, :, 3]
-        
-        # Resize alpha to match depth map size if needed
-        if alpha.shape[:2] != depth_array.shape[:2]:
-            alpha_img = Image.fromarray(alpha).resize(
-                (depth_array.shape[1], depth_array.shape[0]),  # width, height
-                Image.Resampling.LANCZOS
-            )
-            alpha = np.array(alpha_img)
-        
-        # Create mask: threshold at 50% alpha
-        # Pixels with alpha < 128 are considered background
-        mask = alpha >= 128
-        
-        # Apply mask to depth map
-        # Background pixels (mask=False) set to 0 (black = far distance)
-        masked_depth = depth_array.copy()
-        masked_depth[~mask] = 0
-        
-        # Calculate statistics
-        bg_pixels = np.sum(~mask)
-        total_pixels = mask.size
-        bg_percent = (bg_pixels / total_pixels) * 100
-        
-        # Save masked depth map (preserve original bit depth)
-        if original_dtype == np.uint16:
-            # Save as 16-bit
-            Image.fromarray(masked_depth.astype(np.uint16), mode='I;16').save(output_path)
-        else:
-            # Save as 8-bit
-            Image.fromarray(masked_depth.astype(np.uint8)).save(output_path)
-        
-        print(f"  ✓ Depth map masked ({bg_percent:.1f}% background removed)")
-        return output_path
-        
-    except Exception as e:
-        print(f"  ✗ Failed to mask depth map: {e}")
-        raise
+    # Store original dtype (should be uint16 for 16-bit depth)
+    original_dtype = depth_array.dtype
+    
+    print(f"  DEBUG: Depth map shape: {depth_array.shape}, dtype: {original_dtype}")
+    print(f"  DEBUG: Depth range: {depth_array.min()} - {depth_array.max()}")
+    
+    # Load alpha mask from source
+    source_img = Image.open(alpha_source_path)
+    
+    # Check if source has alpha channel
+    if source_img.mode != 'RGBA':
+        print(f"  ℹ️ Source has no alpha channel, skipping mask")
+        return depth_path
+    
+    # Extract alpha channel
+    alpha = np.array(source_img)[:, :, 3]
+    
+    print(f"  DEBUG: Alpha shape: {alpha.shape}")
+    print(f"  DEBUG: Alpha range: {alpha.min()} - {alpha.max()}")
+    
+    # Resize alpha to match depth map size if needed
+    if alpha.shape[:2] != depth_array.shape[:2]:
+        print(f"  DEBUG: Resizing alpha from {alpha.shape} to {depth_array.shape}")
+        alpha_img = Image.fromarray(alpha).resize(
+            (depth_array.shape[1], depth_array.shape[0]),
+            Image.Resampling.LANCZOS
+        )
+        alpha = np.array(alpha_img)
+    
+    # Create mask: Use lower threshold to keep semi-transparent pixels
+    # Anything with even slight transparency (>10) is considered foreground
+    mask = alpha > 10
+    
+    # Count pixels
+    fg_pixels = np.sum(mask)
+    bg_pixels = np.sum(~mask)
+    total_pixels = mask.size
+    bg_percent = (bg_pixels / total_pixels) * 100
+    
+    print(f"  DEBUG: Foreground pixels: {fg_pixels} ({100-bg_percent:.1f}%)")
+    print(f"  DEBUG: Background pixels: {bg_pixels} ({bg_percent:.1f}%)")
+    
+    # Apply mask ONLY to background - DO NOT TOUCH FOREGROUND
+    masked_depth = depth_array.copy()
+    
+    # Set background to 0 (far distance / black)
+    masked_depth[~mask] = 0
+    
+    # Verify we didn't corrupt the foreground
+    print(f"  DEBUG: Masked depth range: {masked_depth.min()} - {masked_depth.max()}")
+    print(f"  DEBUG: Foreground depth range: {masked_depth[mask].min()} - {masked_depth[mask].max()}")
+    
+    # Save masked depth map (preserve bit depth)
+    if original_dtype == np.uint16:
+        Image.fromarray(masked_depth.astype(np.uint16), mode='I;16').save(output_path)
+    else:
+        Image.fromarray(masked_depth.astype(np.uint8)).save(output_path)
+    
+    print(f"  ✓ Masked depth: {bg_percent:.1f}% background removed")
+    return output_path
 
 
 def batch_mask_depths(depth_dir, alpha_source_dir, output_dir=None):

@@ -15,14 +15,15 @@ from tqdm import tqdm
 class ROIDetector:
     """Detects regions of interest (primarily faces) in images."""
     
-    def __init__(self, sam_checkpoint=None, use_sam=True, detection_mode='human'):
+    def __init__(self, sam_checkpoint=None, use_sam=True, detection_mode='human', grounding_dino_model=None):
         """
-        Initialize detector with optional SAM for precise segmentation.
+        Initialize detector with optional SAM and Grounding DINO.
         
         Args:
             sam_checkpoint: Path to SAM model (auto-downloads if None)
             use_sam: If False, only returns bounding boxes (faster)
-            detection_mode: What to detect - 'human', 'animal', 'all', 'custom'
+            detection_mode: 'human', 'automatic', 'contour', 'prompt'
+            grounding_dino_model: Path to Grounding DINO model (auto-downloads if None)
         """
         self.use_sam = use_sam
         self.detection_mode = detection_mode
@@ -46,12 +47,14 @@ class ROIDetector:
             if not cascade.empty():
                 self.cascades.append(('human_profile', cascade))
         
-        # Note: OpenCV doesn't ship with animal cascades
-        # For animals, we'll need to use a different approach or custom trained models
-        
-        if len(self.cascades) == 0:
+        if len(self.cascades) == 0 and detection_mode not in ['automatic', 'contour', 'prompt']:
             print("⚠️  Warning: No detection cascades loaded!")
             print("   Using alternative detection method...")
+        
+        # Initialize Grounding DINO if prompt mode
+        self.grounding_dino = None
+        if detection_mode == 'prompt':
+            self.grounding_dino = self._load_grounding_dino(grounding_dino_model)
         
         # Initialize SAM if requested
         self.sam = None
@@ -125,6 +128,162 @@ class ROIDetector:
         
         print(f"✅ SAM model saved to: {output_path}")
     
+    def _load_grounding_dino(self, model_path=None):
+        """Load Grounding DINO model for prompt-based detection."""
+        try:
+            from groundingdino.util.inference import load_model
+            import torch
+        except ImportError:
+            print("⚠️  Grounding DINO not installed!")
+            print("   Install with: pip install groundingdino-py")
+            print("   Falling back to contour detection...")
+            return None
+        
+        # Determine model path
+        if model_path is None:
+            script_dir = Path(__file__).resolve().parent
+            models_dir = script_dir.parent.parent / "models" / "grounding_dino"
+            models_dir.mkdir(parents=True, exist_ok=True)
+            
+            config_path = models_dir / "GroundingDINO_SwinT_OGC.py"
+            checkpoint_path = models_dir / "groundingdino_swint_ogc.pth"
+            
+            # Download if not exists
+            if not checkpoint_path.exists():
+                print("\n📦 Downloading Grounding DINO model (~600MB)...")
+                print("   This is a one-time download.")
+                self._download_grounding_dino(models_dir, config_path, checkpoint_path)
+        else:
+            checkpoint_path = Path(model_path)
+            config_path = checkpoint_path.parent / "GroundingDINO_SwinT_OGC.py"
+        
+        # Load model
+        print(f"Loading Grounding DINO model...")
+        try:
+            model = load_model(str(config_path), str(checkpoint_path))
+            
+            # Move to GPU if available
+            device = "cuda" if self._has_cuda() else "cpu"
+            model = model.to(device)
+            print(f"   Grounding DINO loaded on: {device}")
+            
+            return model
+        except Exception as e:
+            print(f"⚠️  Failed to load Grounding DINO: {e}")
+            print("   Falling back to contour detection...")
+            return None
+
+    def _download_grounding_dino(self, models_dir, config_path, checkpoint_path):
+        """Download Grounding DINO model and config."""
+        import requests
+        from tqdm import tqdm
+        
+        # Download config
+        config_url = "https://raw.githubusercontent.com/IDEA-Research/GroundingDINO/main/groundingdino/config/GroundingDINO_SwinT_OGC.py"
+        print("   Downloading config...")
+        response = requests.get(config_url)
+        config_path.write_bytes(response.content)
+        
+        # Download checkpoint
+        checkpoint_url = "https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth"
+        print("   Downloading checkpoint (~600MB)...")
+        
+        response = requests.get(checkpoint_url, stream=True)
+        total_size = int(response.headers.get('content-length', 0))
+        
+        with open(checkpoint_path, 'wb') as f, tqdm(
+            desc="Downloading",
+            total=total_size,
+            unit='B',
+            unit_scale=True,
+            unit_divisor=1024,
+        ) as pbar:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+                pbar.update(len(chunk))
+        
+        print(f"✅ Grounding DINO model saved to: {models_dir}")
+
+    def detect_with_prompt(self, image_path, text_prompt, confidence_threshold=0.25, min_size_percent=5.0):
+        """Detect objects using text prompt with Grounding DINO."""
+        if self.grounding_dino is None:
+            print("   ⚠️  Grounding DINO not available, falling back to contour detection")
+            return self.detect_subjects_contour(image_path, min_size_percent)
+        
+        try:
+            from groundingdino.util.inference import predict
+            import torch
+            from PIL import Image as PILImage
+        except ImportError:
+            print("   ⚠️  Grounding DINO dependencies missing")
+            return self.detect_subjects_contour(image_path, min_size_percent)
+        
+        print(f"   Using Grounding DINO with prompt: '{text_prompt}'")
+        
+        # Load image
+        img_pil = PILImage.open(image_path).convert("RGB")
+        img_cv = cv2.imread(str(image_path))
+        h, w = img_cv.shape[:2]
+        img_area = h * w
+        min_area = img_area * (min_size_percent / 100.0)
+        
+        # Run detection
+        boxes, logits, phrases = predict(
+            model=self.grounding_dino,
+            image=img_pil,
+            caption=text_prompt,
+            box_threshold=confidence_threshold,
+            text_threshold=0.25
+        )
+        
+        print(f"   Found {len(boxes)} detection(s)")
+        
+        # Convert boxes from normalized [0-1] to pixel coordinates
+        detected_boxes = []
+        
+        for i, (box, logit, phrase) in enumerate(zip(boxes, logits, phrases)):
+            # Convert from center format to corner format
+            cx, cy, box_w, box_h = box.cpu().numpy()
+            
+            # Denormalize
+            cx *= w
+            cy *= h
+            box_w *= w
+            box_h *= h
+            
+            # Convert to (x, y, w, h) format
+            x = int(cx - box_w / 2)
+            y = int(cy - box_h / 2)
+            w_box = int(box_w)
+            h_box = int(box_h)
+            
+            # Clip to image bounds
+            x = max(0, x)
+            y = max(0, y)
+            w_box = min(w - x, w_box)
+            h_box = min(h - y, h_box)
+            
+            # Check size
+            area = w_box * h_box
+            area_percent = (area / img_area) * 100
+            
+            if area < min_area:
+                print(f"   Rejected '{phrase}': {area_percent:.1f}% of image (too small)")
+                continue
+            
+            confidence = float(logit)
+            print(f"   Accepted '{phrase}': {area_percent:.1f}% of image, confidence: {confidence:.2f}")
+            
+            detected_boxes.append((x, y, w_box, h_box))
+        
+        # Remove overlapping boxes
+        if len(detected_boxes) > 1:
+            detected_boxes = self._remove_overlapping_detections(detected_boxes, overlap_threshold=0.3)
+        
+        print(f"   Final detections: {len(detected_boxes)}")
+        
+        return detected_boxes
+
     def detect_subjects_automatic(self, image_path, min_size_percent=5.0):
         """
         Automatically detect all significant subjects using SAM's automatic mask generation.

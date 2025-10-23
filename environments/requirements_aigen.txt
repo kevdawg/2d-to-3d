@@ -1,0 +1,8 @@
+# Environment: imagen
+# Purpose: AI image generation (Gemini Flash and Imagen 3)
+# Python: 3.10+
+
+google-cloud-aiplatform>=1.38.0
+google-auth>=2.23.0
+pillow>=10.0.0
+requests>=2.31.0

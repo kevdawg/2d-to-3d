@@ -43,6 +43,11 @@ rembg_models/
 # Data Files (Input/Output - user-specific)
 # ----------------------------------------
 # Data can be at root or in data/ directory
+# NEW STRUCTURE
+data/AI_files/*
+data/photos/*
+data/photos_enhanced/*
+data/3D_files/*
 2D_files/
 2D_files_enhanced/
 2D_enhanced/
@@ -61,6 +66,10 @@ data/3D_files/
 **/3D_files/
 
 # Keep directory structure but ignore contents
+!data/3D_files/.gitkeep
+!data/photos_enhanced/.gitkeep
+!data/AI_files/.gitkeep
+!data/photos/.gitkeep
 !2D_files/.gitkeep
 !2D_files_enhanced/.gitkeep
 !2D_enhanced/.gitkeep

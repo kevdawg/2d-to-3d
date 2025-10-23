@@ -132,10 +132,12 @@ class RegionProcessor:
             cmd.append("--match_input_res")
         
         # Run Marigold
+        print(f"   Running Marigold on {region_name}...")
         result = subprocess.run(
             cmd,
-            capture_output=True,
-            text=True,
+            # Don't capture - let output show live
+            stdout=None,  # ← Shows progress bars
+            stderr=None,
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         )
         

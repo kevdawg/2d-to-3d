@@ -5,82 +5,68 @@
 # ----------------------------------------
 # Environment Configuration
 # ----------------------------------------
-conda_exe: "conda"  # Path to conda executable. Use "conda" for auto-detect, or full path like "C:/Users/Owner/anaconda3/Scripts/conda.exe"
-imagen_env: "imagen"  # Name of conda environment for Gemini Imagen image generation
-marigold_env: "marigold"  # Name of conda environment for Marigold depth processing
-depth_env: "depth-to-3d"  # Name of conda environment for 3D extrusion
-use_conda: true  # Set to false to run without conda (not recommended)
+conda_exe: "conda"
+imagen_env: "imagen"              # For Imagen 3 generation
+marigold_env: "marigold"          # For depth estimation
+depth_env: "depth-to-3d"          # For 3D extrusion
+photo_prep_env: "photo-prep"      # For photo enhancement (if needed)
+use_conda: true
 
 # ----------------------------------------
 # File Paths (relative to pipeline folder)
 # ----------------------------------------
 marigold_cli: "../scripts/depth_generation/marigold_cli.py"
 extrude_cli: "../scripts/model_generation/extrude_cli.py"
-dir_2d: "../data/2D_files"
-dir_3d: "../data/3D_files"
 rembg_models: "../models/rembg_models"
 
+# Folder Structure
+dir_ai_generated: "../data/AI_files"      # AI-generated images
+dir_photos: "../data/Photos"              # User photos (may need enhancement)
+dir_3d: "../data/3D_files"                # All 3D outputs
+dir_enhanced: "../data/Photos_enhanced"   # Enhanced photos cache
 
 # ----------------------------------------
-# Photo enhancement settings
+# AI Image Generation
 # ----------------------------------------
-photo_enhancement:
-  # NONE preset - Skip enhancement entirely (for clean photos)
-  none:
-    denoise_strength: 0           # No processing at all
-    use_guided_filter: false
-    use_bilateral: false
-    enhance_details: 0
-    use_hdr: false
-    clahe_clip: 0
-    sharpen_radius: 0
-    sharpen_percent: 0
-    saturation: 1.0
+prompts_file: "prompts.json"           # Path to prompt templates (relative to pipeline/)
+default_prompt_view: "side_profile"    # Default view type
+default_prompt_style: "standard"       # Default style
 
-    # MINIMAL preset - Best for depth mapping (RECOMMENDED)
-  minimal:
-    denoise_strength: 3           # Very light denoising only
-    use_guided_filter: false
-    use_bilateral: false
-    enhance_details: 0            # NO detail enhancement
-    use_hdr: false                # NO HDR
-    clahe_clip: 0                 # NO contrast adjustment
-    sharpen_radius: 0
-    sharpen_percent: 0            # NO sharpening
-    saturation: 1.0               # NO saturation boost
-
-  # Original presets (use only if depth quality is already good)
-  light:
-    denoise_strength: 5
-    use_guided_filter: false
-    use_bilateral: false
-    enhance_details: 0
-    use_hdr: false
-    clahe_clip: 1.5
-    sharpen_radius: 2
-    sharpen_percent: 120
-    sharpen_threshold: 3
-    saturation: 1.1
+# ----------------------------------------
+# Photo Enhancement (Auto-Applied)
+# ----------------------------------------
+auto_enhance_photos: true                 # Auto-enhance photos from photos/ folder
+auto_enhance_preset: "minimal"            # Options: "none", "minimal", "balanced", "heavy"
+# Note: AI images skip enhancement (already optimized)
 
 # ----------------------------------------
 # Background Removal
 # ----------------------------------------
 remove_background: true
-bg_removal_method: "removebg" # Method: "removebg" ($0.20/image) or "rembg" (free)
-bg_removal_model: "isnet-general-use" # rembg model options: "u2net", "isnet-general-use", "u2net_human_seg", "silueta"
-bg_crop_enabled: true # Auto-crop transparent borders (speeds up processing significantly)
-bg_crop_margin: 10 # Margin to leave around subject when cropping (pixels)
-# Note: For remove.bg, set environment variable:
-#   Windows: setx REMOVEBG_API_KEY "your-api-key-here"
-#   Get API key at: https://www.remove.bg/users/sign_up
+bg_removal_method: "rembg"  # "removebg" ($0.20/image) or "rembg" (free)
+bg_removal_model: "isnet-general-use"
+bg_crop_enabled: true
+bg_crop_margin: 10
+mask_depth_map: true
 
+# ----------------------------------------
+# 3D Generation Method
+# ----------------------------------------
+# Primary method for depth generation
+depth_method: "marigold"                  # Options: "marigold", "triposr" (not yet implemented)
+
+# TripoSR settings (placeholder for future)
+enable_triposr: false                     # Set to true when ready to use
+triposr_settings:
+  marching_cubes_resolution: 256
+  target_faces: 50000
+  device: "cuda"
 
 # ----------------------------------------
 # Marigold Depth Generation Presets
 # ----------------------------------------
 marigold_presets:
   
-  # Low quality preset (faster, lower detail)
   low_quality:
     marigold_steps: 5
     marigold_ensemble: 1
@@ -88,7 +74,6 @@ marigold_presets:
     marigold_match_input_res: false
     marigold_enhance_photo: true
   
-  # Medium quality preset (balanced)
   medium_quality:
     marigold_steps: 10
     marigold_ensemble: 3
@@ -96,7 +81,6 @@ marigold_presets:
     marigold_match_input_res: false
     marigold_enhance_photo: true
 
-  # High quality preset (slower, maximum detail)
   high_quality:
     marigold_steps: 20
     marigold_ensemble: 5
@@ -105,109 +89,84 @@ marigold_presets:
     marigold_enhance_photo: false
 
 # ----------------------------------------
-# Advanced Marigold Parameters (Uncommented if needed)
-# ----------------------------------------
-# marigold_batch_size: 1  # Batch size for processing. Range: 1-8, common: 1. Higher = faster on GPU but more VRAM usage
-# marigold_resample_method_input: "bilinear"  # Resampling method for input. Options: "nearest", "bilinear", "bicubic", common: "bilinear"
-# marigold_resample_method_output: "bilinear"  # Resampling method for output. Options: "nearest", "bilinear", "bicubic", common: "bilinear"
-# marigold_output_type: "np"  # Output type. Options: "np" (numpy), "pt" (pytorch), "pil" (PIL), common: "np"
-# marigold_output_uncertainty: false  # Output uncertainty map. Options: true/false, common: false. Requires ensemble_size >= 3
-# marigold_output_latent: false  # Output latent representation. Options: true/false, common: false. Used for video consistency
-# marigold_generator_seed: null  # Random seed for reproducibility. Range: 0-2^32, common: null (random). Set integer for deterministic results
-
-
-# ----------------------------------------
 # 3D Extrusion Parameters
 # ----------------------------------------
 extrude_defaults:
-  # Basic model parameters
-  width_mm: 100.0           # Width of final model in mm (10-1000)
-  max_height_mm: null       # Maximum height of relief in mm (1-100, overrides emboss if set)
-                            # Set to null to use emboss parameter instead
-  smoothing: 3              # Median filter (must be odd: 1,3,5,7,9)
-  
-  # Depth mapping
-  near_offset: 0.0          # Near clipping 0.0-1.0
-  far_offset: 1.0           # Far clipping 0.0-1.0
-  
-  # Embossing and frame
-  emboss: 0.3               # Emboss depth 0.1-1.0 (ignored if max_height_mm is set)
-  f_thic: 0.05              # Frame thickness 0.01-0.2 (use 0 for no border)
-  f_near: -0.15             # Front frame position -0.5-0.0
-  f_back: 0.01              # Back frame thickness 0.01-0.1
-  
-  # Output options
-  vertex_colors: true       # Include colors in model
-  scene_lights: true        # Add lights to GLB for better viewing
-  prepare_for_3d_printing: false  # Rotate 90° for printing
-  zip_outputs: false        # Compress files
+  width_mm: 100.0
+  max_height_mm: null
+  smoothing: 3
+  near_offset: 0.0
+  far_offset: 1
+  emboss: 0.2
+  f_thic: 0.00
+  f_near: -0.0
+  f_back: 0.00
+  vertex_colors: false
+  scene_lights: false
+  prepare_for_3d_printing: true
+  zip_outputs: false
 
 # ----------------------------------------
-# Image Generation Settings
-# ----------------------------------------
-# Note: Image generation quality is controlled by which script is called
-# (generate_with_gemini.py vs generate_with_imagen3.py)
-# These settings would go in those scripts, not in config.yaml
-
-# Imagen 3 settings (in generate_with_imagen3.py):
-# - aspect_ratio: "1:1"  # Options: "1:1", "4:3", "16:9", etc. Common: "1:1" for square
-# - safety_filter_level: "block_some"  # Options: "block_none", "block_some", "block_most", common: "block_some"
-# - person_generation: "allow_adult"  # Options: "allow_adult", "block_all", common: "allow_adult"
-# - number_of_images: 1  # Range: 1-8, common: 1. Number of variations to generate
-
-# Gemini API settings (in generate_with_gemini.py):
-# - model: "gemini-1.5-flash"  # Options: "gemini-1.5-flash", "gemini-1.5-pro", common: "gemini-1.5-flash"
-# - temperature: 1.0  # Range: 0.0-2.0, common: 0.7-1.3. Controls randomness
-# - top_p: 0.95  # Range: 0.0-1.0, common: 0.9-0.99. Nucleus sampling parameter
-# - top_k: 40  # Range: 1-100, common: 20-60. Top-k sampling parameter
-
-# ----------------------------------------
-# Region-Specific Processing (for faces, etc.)
+# Region-Specific Processing
 # ----------------------------------------
 region_processing:
-  enabled: false            # Set to true to enable face detection + regional processing
-  use_sam: true             # Use SAM for precise masks (requires ~2.4GB download)
-  blend_width: 30           # Pixels for smooth blending between regions
-
-# Detection method:
-# - 'human': Human faces only (Haar Cascades - fast)
-# - 'automatic': Any subject using SAM (slower but works for animals, objects, etc.)
-# - 'all': Try human cascades first, then SAM automatic
-detection_mode: 'automatic'
-
-# Minimum size for detected regions (as % of image dimension)
-min_subject_size_percent: 5.0  # Ignore detections smaller than this
+  enabled: false
+  use_sam: true
+  blend_width: 30
+  detection_mode: 'prompt'                # 'human', 'contour', prompt', 'automatic'
+  detection_prompt: "cow face. cow head. goat face. animal face. animal head. animal body"
+  prompt_confidence: 0.25
+  min_subject_size_percent: 5.0
   
-# Settings for face regions (high detail)
-face:
-  preprocessing:
-    denoise_strength: 8
-    clahe_clip: 3.0       # Strong local contrast
-    sharpen_radius: 2
-    sharpen_percent: 200  # Extra sharpening
-    sharpen_threshold: 2
-    enhance_details: 1.5  # Detail enhancement
-    bilateral_filter: false
-  marigold:
-    steps: 30             # Maximum quality
-    ensemble: 10
-    processing_res: 1024
-    match_input_res: false
+  face:
+    preprocessing:
+      denoise_strength: 8
+      clahe_clip: 3.0
+      sharpen_radius: 2
+      sharpen_percent: 200
+      sharpen_threshold: 2
+      enhance_details: 1.5
+      bilateral_filter: false
+    marigold:
+      steps: 30
+      ensemble: 10
+      processing_res: 1024
+      match_input_res: false
 
-# Settings for background (smooth)
-background:
-  preprocessing:
-    denoise_strength: 15  # More smoothing
-    clahe_clip: 1.5
-    sharpen_radius: 2
-    sharpen_percent: 100  # Less sharpening
-    sharpen_threshold: 3
-    enhance_details: 0    # No detail enhancement
-    bilateral_filter: true
-    bilateral_d: 9
-    bilateral_sigma: 75
-  marigold:
-    steps: 15             # Faster processing
-    ensemble: 5
-    processing_res: 768
-    match_input_res: false
+  background:
+    preprocessing:
+      denoise_strength: 15
+      clahe_clip: 1.5
+      sharpen_radius: 2
+      sharpen_percent: 100
+      sharpen_threshold: 3
+      enhance_details: 0
+      bilateral_filter: true
+      bilateral_d: 9
+      bilateral_sigma: 75
+    marigold:
+      steps: 15
+      ensemble: 5
+      processing_res: 768
+      match_input_res: false
+
+# ----------------------------------------
+# Advanced Post-Processing (NEW)
+# ----------------------------------------
+enable_advanced_postprocessing: false      # Apply MakerWorld-style mesh optimization
+postprocessing_settings:
+  relief_height_mm: 10.0                  # Target relief height
+  base_thickness_mm: 2.0                  # Base plate thickness
+  target_faces: 50000                     # Face count after decimation
+  smoothing_iterations: 2                 # Surface smoothing passes
+  repair_mesh: true                       # Fix non-manifold edges, holes, etc.
+  save_intermediate: true                 # Keep both raw and optimized STLs
+
+# ----------------------------------------
+# Output File Formats
+# ----------------------------------------
+export_formats:
+  stl: true                               # Always needed for CNC
+  glb: false                              # Set true if you want GLB files
+  obj: false                              # Set true if you want OBJ files
+delete_source_after_processing: true      # Deletes original file

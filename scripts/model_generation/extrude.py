@@ -112,17 +112,17 @@ def extrude_depth_3d(
     path_rgb=None,
     path_out_base=None,
     output_model_scale=100,
-    max_height_mm=None,  # NEW PARAMETER
+    max_height_mm=None,
     filter_size=3,
     coef_near=0.0,
     coef_far=1.0,
     emboss=0.3,
-    f_thic=0.05,
-    f_near=-0.15,
-    f_back=0.01,
+    f_thic=0.00,
+    f_near=-0.0,
+    f_back=0.00,
     vertex_colors=True,
     scene_lights=True,
-    prepare_for_3d_printing=False,
+    prepare_for_3d_printing=True,
     zip_outputs=False,
 ):
     """

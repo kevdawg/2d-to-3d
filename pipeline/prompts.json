@@ -1,0 +1,53 @@
+{
+  "views": {
+    "side_profile": {
+      "name": "Side Profile",
+      "description": "Strong side view optimized for bas-relief depth",
+      "template": "Grayscale, photorealistic, razor-sharp, ultra-detailed, single image suitable for bas relief and CNC cutout, designed to maximize perceived depth and dynamic form. {description} shown from a strong side profile view with controlled lighting to reveal maximum volumetric detail. The subject is presented on a perfectly transparent background, captured from an angle that showcases clear depth and three-dimensional form...",
+      "negative": "multiple views, front view, back view, extreme perspective..."
+    },
+    "three_quarter": {
+      "name": "Three-Quarter View",
+      "description": "Angled view showing depth and character",
+      "template": "Grayscale, photorealistic, razor-sharp, ultra-detailed bas relief suitable image. {description} captured from a three-quarter angle that reveals both frontal features and side depth...",
+      "negative": "flat view, straight on, no depth..."
+    },
+    "isometric": {
+      "name": "Isometric Angle",
+      "description": "Technical isometric view for even depth",
+      "template": "Grayscale, photorealistic, technical isometric view. {description} rendered from 30-degree isometric angle...",
+      "negative": "perspective distortion, vanishing point..."
+    },
+    "portrait": {
+      "name": "Portrait (Front)",
+      "description": "Frontal portrait with depth",
+      "template": "Grayscale, photorealistic portrait. {description} facing forward with dramatic side lighting to create depth through shadows...",
+      "negative": "flat lighting, no depth, side view..."
+    },
+    "exaggerated_depth": {
+      "name": "Exaggerated Depth",
+      "description": "Enhanced depth perception for carving",
+      "template": "Grayscale, photorealistic with EXAGGERATED depth perception. {description} with extreme lighting contrast to maximize perceived three-dimensional form...",
+      "negative": "flat, minimal contrast, subtle..."
+    }
+  },
+  
+  "default_view": "side_profile",
+  
+  "styles": {
+    "standard": {
+      "name": "Standard Detail",
+      "additions": "Studio quality, 8K resolution, hyper-sharp focus."
+    },
+    "ultra_detail": {
+      "name": "Ultra Detail",
+      "additions": "MICROSCOPIC detail, every surface texture meticulously rendered, ultra-high-frequency textures."
+    },
+    "simplified": {
+      "name": "Simplified Forms",
+      "additions": "Clean, simplified forms with clear edges, suitable for easier machining."
+    }
+  },
+  
+  "default_style": "standard"
+}

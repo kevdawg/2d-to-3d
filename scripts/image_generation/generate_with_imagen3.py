@@ -8,6 +8,11 @@ See CREDENTIALS_SETUP.md for detailed setup instructions.
 """
 import os
 import sys
+
+# Suppress gRPC warnings before any Google imports
+os.environ['GRPC_VERBOSITY'] = 'ERROR'
+os.environ['GLOG_minloglevel'] = '2'
+
 import argparse
 import warnings
 from pathlib import Path
@@ -15,6 +20,8 @@ from pathlib import Path
 # Suppress deprecation warnings
 warnings.filterwarnings('ignore', category=UserWarning)
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress TensorFlow warnings
+
+
 
 try:
     from vertexai.preview.vision_models import ImageGenerationModel
