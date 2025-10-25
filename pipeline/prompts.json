@@ -1,53 +1,53 @@
 {
-  "views": {
+  "base_template": {
+    "prefix": "Grayscale, photorealistic, razor-sharp, ultra-detailed, single image suitable for bas relief and CNC cutout, designed to maximize perceived depth and dynamic form.",
+    "suffix": "Studio quality, 8K resolution, hyper-sharp focus throughout the entire object with microscopic detail. The image should resemble a highly detailed heightmap, emphasizing volumetric form through subtle tonal variations from pure black to pure white. Perfect edge definition with no soft focus. Optimal lighting to reveal all surface variations and contours.",
+    "negative": "multiple views, extreme perspective, heavy distortion, bokeh, atmospheric haze, motion blur, color, sepia, tinted backgrounds, text, watermarks, logos, busy patterns, cluttered composition, soft focus, depth of field, vignetting, chromatic aberration, noise, grain, artifacts, compression, low resolution, blurry edges, flat lighting, overexposure, underexposure, harsh shadows"
+  },
+  
+  "prompts": {
     "side_profile": {
-      "name": "Side Profile",
-      "description": "Strong side view optimized for bas-relief depth",
-      "template": "Grayscale, photorealistic, razor-sharp, ultra-detailed, single image suitable for bas relief and CNC cutout, designed to maximize perceived depth and dynamic form. {description} shown from a strong side profile view with controlled lighting to reveal maximum volumetric detail. The subject is presented on a perfectly transparent background, captured from an angle that showcases clear depth and three-dimensional form...",
-      "negative": "multiple views, front view, back view, extreme perspective..."
+      "name": "Side Profile (Best for Relief)",
+      "description": "Strong side view optimized for bas-relief depth perception",
+      "view_description": "{subject} shown from a strong side profile view with controlled lighting that reveals maximum volumetric detail and depth. The subject is presented on a perfectly transparent background, captured from an angle that showcases clear three-dimensional form with distinct foreground and background separation."
     },
+    
     "three_quarter": {
       "name": "Three-Quarter View",
-      "description": "Angled view showing depth and character",
-      "template": "Grayscale, photorealistic, razor-sharp, ultra-detailed bas relief suitable image. {description} captured from a three-quarter angle that reveals both frontal features and side depth...",
-      "negative": "flat view, straight on, no depth..."
+      "description": "Angled view showing both depth and frontal character",
+      "view_description": "{subject} captured from a three-quarter angle (approximately 45 degrees) that reveals both frontal features and side depth. Dynamic lighting emphasizes the sculptural qualities and creates clear depth gradients from foreground to background."
     },
+    
+    "front_portrait": {
+      "name": "Front Portrait",
+      "description": "Frontal view with dramatic side lighting for depth",
+      "view_description": "{subject} facing directly forward with strong directional side lighting (from 45-degree angle) that creates dramatic shadows and highlights to emphasize depth and three-dimensional form despite the frontal orientation."
+    },
+    
     "isometric": {
-      "name": "Isometric Angle",
-      "description": "Technical isometric view for even depth",
-      "template": "Grayscale, photorealistic, technical isometric view. {description} rendered from 30-degree isometric angle...",
-      "negative": "perspective distortion, vanishing point..."
+      "name": "Isometric Technical",
+      "description": "Technical isometric view for even depth distribution",
+      "view_description": "{subject} rendered from a technical isometric angle (30 degrees from horizontal) with even, controlled lighting that reveals all surfaces and contours uniformly. Clean geometric presentation suitable for technical or architectural subjects."
     },
-    "portrait": {
-      "name": "Portrait (Front)",
-      "description": "Frontal portrait with depth",
-      "template": "Grayscale, photorealistic portrait. {description} facing forward with dramatic side lighting to create depth through shadows...",
-      "negative": "flat lighting, no depth, side view..."
+    
+    "dramatic_angle": {
+      "name": "Dramatic Low Angle",
+      "description": "Heroic low angle with exaggerated depth",
+      "view_description": "{subject} captured from a low camera angle looking upward, creating a heroic, imposing presentation with exaggerated depth perception. Strong upward lighting enhances the dramatic three-dimensional effect."
     },
-    "exaggerated_depth": {
-      "name": "Exaggerated Depth",
-      "description": "Enhanced depth perception for carving",
-      "template": "Grayscale, photorealistic with EXAGGERATED depth perception. {description} with extreme lighting contrast to maximize perceived three-dimensional form...",
-      "negative": "flat, minimal contrast, subtle..."
+    
+    "top_down": {
+      "name": "Top-Down (Bird's Eye)",
+      "description": "Overhead view showing form and silhouette",
+      "view_description": "{subject} viewed from directly above in a top-down bird's eye perspective. Lighting from multiple angles reveals the surface topography and form variations from this unique vantage point."
     }
   },
   
-  "default_view": "side_profile",
+  "default_prompt": "side_profile",
   
-  "styles": {
-    "standard": {
-      "name": "Standard Detail",
-      "additions": "Studio quality, 8K resolution, hyper-sharp focus."
-    },
-    "ultra_detail": {
-      "name": "Ultra Detail",
-      "additions": "MICROSCOPIC detail, every surface texture meticulously rendered, ultra-high-frequency textures."
-    },
-    "simplified": {
-      "name": "Simplified Forms",
-      "additions": "Clean, simplified forms with clear edges, suitable for easier machining."
-    }
-  },
-  
-  "default_style": "standard"
+  "custom_prompt_template": {
+    "name": "Custom Prompt",
+    "description": "Enter your own description with automatic quality optimization",
+    "note": "Your description will be enhanced with bas-relief quality settings automatically"
+  }
 }

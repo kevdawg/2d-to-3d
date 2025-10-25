@@ -87,9 +87,67 @@ def main():
         print(f"ERROR: Input file does not exist: {input_path}")
         sys.exit(1)
     
-    output_path = Path(args.output)
-    output_base = str(output_path.with_suffix(''))  # Remove .stl extension
+    # VALIDATE AND FIX DEPTH MAP FORMAT
+    print(f"Validating depth map format...")
+    from PIL import Image
+    import numpy as np
     
+    depth_img = Image.open(input_path)
+    print(f"  Input: {depth_img.mode}, {depth_img.size}")
+    
+    needs_conversion = False
+    
+    # Check if it's grayscale
+    if depth_img.mode not in ['L', 'I', 'I;16']:
+        print(f"  Converting from {depth_img.mode} to grayscale...")
+        needs_conversion = True
+        
+        # If RGB/RGBA, use first channel or convert
+        if depth_img.mode in ['RGB', 'RGBA']:
+            # Use luminosity conversion
+            depth_img = depth_img.convert('L')
+        else:
+            depth_img = depth_img.convert('L')
+    
+    # Check bit depth and convert to 16-bit if needed
+    depth_array = np.array(depth_img)
+    
+    # Handle multi-channel (shouldn't happen after conversion, but be safe)
+    if len(depth_array.shape) > 2:
+        print(f"  Extracting first channel from multi-channel depth...")
+        depth_array = depth_array[:, :, 0]
+        needs_conversion = True
+    
+    # Ensure 16-bit depth values
+    if depth_array.dtype != np.uint16:
+        print(f"  Converting to 16-bit depth...")
+        if depth_array.max() <= 255:
+            # 8-bit, scale to 16-bit
+            depth_array = (depth_array.astype(np.float32) / 255.0 * 65535.0).astype(np.uint16)
+        else:
+            depth_array = depth_array.astype(np.uint16)
+        needs_conversion = True
+    
+    # If we made changes, save corrected version temporarily
+    if needs_conversion:
+        import tempfile
+        temp_depth = tempfile.NamedTemporaryFile(suffix='_depth_corrected.png', delete=False)
+        temp_depth_path = temp_depth.name
+        temp_depth.close()
+        
+        corrected_img = Image.fromarray(depth_array.astype(np.uint16))
+        corrected_img.save(temp_depth_path, format='PNG')
+        print(f"  Corrected depth map saved temporarily")
+        
+        # Use corrected path for extrusion
+        actual_input_path = temp_depth_path
+    else:
+        print(f"  Depth map format is valid")
+        actual_input_path = str(input_path)
+    
+    output_path = Path(args.output)
+    output_base = str(output_path.with_suffix(''))
+
     # Convert smoothing to odd integer
     filter_size = int(args.smoothing)
     if filter_size % 2 == 0:
@@ -105,7 +163,7 @@ def main():
     try:
         # Call the extrude function with ALL parameters
         path_glb, path_stl, path_obj = extrude_depth_3d(
-            path_depth=str(input_path),
+            path_depth=str(actual_input_path),
             path_rgb=None,
             path_out_base=output_base,
             output_model_scale=args.width_mm,
@@ -132,6 +190,10 @@ def main():
         print(f"\n{ERR} ERROR: Failed to create 3D model: {e}")
         import traceback
         traceback.print_exc()
+
+        if needs_conversion and 'actual_input_path' in locals() and os.path.exists(actual_input_path):
+            os.unlink(actual_input_path)
+            
         sys.exit(1)
 
 

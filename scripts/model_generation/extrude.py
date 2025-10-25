@@ -202,7 +202,7 @@ def extrude_depth_3d(
             [-w_half - f_thic, h_half + f_thic, f_far_outer],
         ],
         axis=0,
-    )
+        )
     faces.extend(
         [
             [nv + 0, nv + 1, nv + 2],

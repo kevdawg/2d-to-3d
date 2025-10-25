@@ -5,6 +5,7 @@
 # 3D mesh processing
 trimesh==4.0.5
 pygltflib==1.16.1
+pymeshlab>=2023.12    # ADD THIS LINE for mesh repair
 
 # Image processing
 pillow==10.3.0

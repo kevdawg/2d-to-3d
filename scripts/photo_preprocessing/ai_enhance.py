@@ -1,365 +1,454 @@
 #!/usr/bin/env python3
 """
-AI Enhancement Pipeline for Face Segments
-Combines upscaling, face restoration, and sharpening for maximum detail.
-"""
+AI-Powered Image Enhancement for Depth Map Optimization
+Upscales and enhances images using state-of-the-art AI models.
 
+Supports multiple upscaling methods:
+- Real-ESRGAN: Great general purpose (recommended for photos)
+- LANCZOS: Fast, no AI dependencies (good fallback)
+- Waifu2x: Great for anime characters (NOT for photos)
+- GFPGAN: Specialized for faces (portraits only)
+
+Dependencies are auto-installed if missing (requires internet connection).
+"""
+import numpy as np
+from PIL import Image, ImageEnhance, ImageFilter
 import sys
 import subprocess
-import shutil
+import importlib
 from pathlib import Path
-from PIL import Image, ImageEnhance, ImageFilter
-import numpy as np
+import argparse
 
 
-current_file = Path(__file__).resolve()
-current_dir = current_file.parent
-scripts_dir = current_dir.parent
-depth_gen_dir = scripts_dir / "depth_generation"
-sys.path.insert(0, str(depth_gen_dir))
-
-
-def enhance_with_codeformer(input_path, output_path, fidelity=0.7):
+def install_package_in_current_env(package_name):
     """
-    Enhance face with CodeFormer (face restoration AI).
+    Install package in the currently active Python/conda environment.
+    Uses the current Python interpreter to ensure correct environment.
+    """
+    print(f"  Installing {package_name}...")
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", package_name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        print(f"  ✓ {package_name} installed successfully")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"  ✗ Failed to install {package_name}: {e}")
+        return False
+
+
+def lazy_import(module_name, package_name=None):
+    """
+    Try to import a module, install if missing, then retry.
     
     Args:
-        input_path: Input face image
-        output_path: Enhanced output
-        fidelity: 0-1, higher = more faithful to original (0.5-0.9 recommended)
+        module_name: Name to import (e.g., 'cv2')
+        package_name: Name to install if different (e.g., 'opencv-python')
     
     Returns:
-        Path to enhanced image
-    
-    Requires: CodeFormer installed
-    Download from: https://github.com/sczhou/CodeFormer
+        Imported module or None if installation failed
     """
-    codeformer = shutil.which("python") or "python"
-    codeformer_script = Path("tools/CodeFormer/inference_codeformer.py")
+    if package_name is None:
+        package_name = module_name
     
-    if not codeformer_script.exists():
-        raise RuntimeError(
-            "CodeFormer not found. Install from:\n"
-            "https://github.com/sczhou/CodeFormer"
+    try:
+        return importlib.import_module(module_name)
+    except ImportError:
+        print(f"  {module_name} not found, attempting to install...")
+        if install_package_in_current_env(package_name):
+            try:
+                return importlib.import_module(module_name)
+            except ImportError as e:
+                print(f"  ✗ Failed to import {module_name} after installation: {e}")
+                return None
+        return None
+
+
+def upscale_realesrgan(img, scale=4):
+    """
+    Upscale using Real-ESRGAN (state-of-the-art AI upscaling).
+    Great general purpose - Best for photos, textures, and detailed images.
+    
+    Performance: Moderate speed on GPU, slow on CPU (~2-4 min for 1024x1024 → 4096x4096)
+    Memory: ~4GB RAM for 1024x1024 input
+    """
+    print(f"Upscaling {scale}x with Real-ESRGAN (AI model)...")
+    
+    # Lazy import Real-ESRGAN
+    realesrgan = lazy_import('realesrgan', 'realesrgan')
+    if realesrgan is None:
+        print("  ✗ Real-ESRGAN unavailable, falling back to LANCZOS")
+        return upscale_lanczos(img, scale)
+    
+    try:
+        from realesrgan import RealESRGANer
+        from basicsr.archs.rrdbnet_arch import RRDBNet
+        
+        # Initialize model
+        model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=scale)
+        upsampler = RealESRGANer(
+            scale=scale,
+            model_path=None,  # Will download automatically
+            model=model,
+            tile=400,  # Process in tiles to save memory
+            tile_pad=10,
+            pre_pad=0,
+            half=False  # Use FP32 for CPU compatibility
         )
-    
-    cmd = [
-        codeformer,
-        str(codeformer_script),
-        "-i", str(input_path),
-        "-o", str(output_path.parent),
-        "--fidelity_weight", str(fidelity),
-        "--bg_upsampler", "realesrgan",
-        "--face_upsample"
-    ]
-    
-    print(f"  Enhancing face with CodeFormer (fidelity={fidelity})...")
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    
-    if result.returncode != 0:
-        raise RuntimeError(f"CodeFormer failed: {result.stderr}")
-    
-    # CodeFormer saves to specific output structure, move to desired location
-    # (Implementation depends on CodeFormer's output structure)
-    
-    return output_path
+        
+        # Convert PIL to numpy array
+        img_np = np.array(img)
+        
+        # Upscale
+        output, _ = upsampler.enhance(img_np, outscale=scale)
+        
+        # Convert back to PIL
+        return Image.fromarray(output)
+        
+    except Exception as e:
+        print(f"  ✗ Real-ESRGAN failed: {e}")
+        print("  Falling back to LANCZOS...")
+        return upscale_lanczos(img, scale)
 
 
-def enhance_with_gfpgan(input_path, output_path, version="1.4"):
+def upscale_lanczos(img, scale=4):
     """
-    Enhance face with GFPGAN (face restoration).
-    Lighter weight alternative to CodeFormer.
+    Upscale using LANCZOS (Pillow's high-quality resampling).
+    Fast! - No AI dependencies, works on any hardware.
     
-    Requires: gfpgan package
-    Install: pip install gfpgan
+    Performance: Very fast (~2-5 seconds for any size)
+    Memory: Low (~2x input size)
+    Quality: Good, but not as detailed as AI methods
     """
+    print(f"Upscaling {scale}x with Pillow (Lanczos)...")
+    new_size = (img.width * scale, img.height * scale)
+    return img.resize(new_size, Image.Resampling.LANCZOS)
+
+
+def upscale_waifu2x(img, scale=4):
+    """
+    Upscale using Waifu2x (specialized for anime/illustrations).
+    Great for anime characters - Trained on anime/manga, NOT suitable for photos.
+    
+    Performance: Fast to moderate
+    Memory: Moderate
+    Use Case: Only use for anime-style images, illustrations, or line art
+    """
+    print(f"Upscaling {scale}x with Waifu2x (anime model)...")
+    
+    # Lazy import waifu2x
+    # Note: This requires waifu2x-ncnn-vulkan-python
+    try:
+        waifu2x = lazy_import('waifu2x_ncnn_vulkan_python', 'waifu2x-ncnn-vulkan')
+        if waifu2x is None:
+            print("  ✗ Waifu2x unavailable, falling back to LANCZOS")
+            return upscale_lanczos(img, scale)
+        
+        from waifu2x_ncnn_vulkan_python import Waifu2x
+        
+        # Initialize model
+        upscaler = Waifu2x(gpuid=0, scale=scale, noise=0)
+        
+        # Convert PIL to numpy
+        img_np = np.array(img)
+        
+        # Upscale
+        output = upscaler.process(img_np)
+        
+        return Image.fromarray(output)
+        
+    except Exception as e:
+        print(f"  ✗ Waifu2x failed: {e}")
+        print("  Falling back to LANCZOS...")
+        return upscale_lanczos(img, scale)
+
+
+def upscale_gfpgan(img, scale=4):
+    """
+    Upscale using GFPGAN (specialized for face restoration).
+    Specialized for faces - Best for portraits and close-up faces.
+    
+    Performance: Moderate on GPU, slow on CPU
+    Memory: Moderate to high
+    Use Case: ONLY use for images with prominent faces
+    Note: Also does face restoration (fixes blur, artifacts)
+    """
+    print(f"Upscaling {scale}x with GFPGAN (face restoration)...")
+    
+    # Lazy import GFPGAN
+    gfpgan = lazy_import('gfpgan', 'gfpgan')
+    if gfpgan is None:
+        print("  ✗ GFPGAN unavailable, falling back to LANCZOS")
+        return upscale_lanczos(img, scale)
+    
     try:
         from gfpgan import GFPGANer
-        from basicsr.archs.rrdbnet_arch import RRDBNet
-        import torch
-    except ImportError:
-        raise RuntimeError("GFPGAN not installed. Run: pip install gfpgan")
-    
-    print(f"  Enhancing face with GFPGAN v{version}...")
-    
-    # Determine device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    # Initialize restorer
-    model_path = f"models/GFPGANv{version}.pth"
-    if not Path(model_path).exists():
-        print(f"  Downloading GFPGAN model...")
-        # Auto-download handled by GFPGANer
-    
-    restorer = GFPGANer(
-        model_path=model_path,
-        upscale=1,  # Don't upscale, just restore
-        arch='clean',
-        channel_multiplier=2,
-        bg_upsampler=None,
-        device=device
-    )
-    
-    # Read image
-    img = np.array(Image.open(input_path).convert('RGB'))
-    
-    # Restore
-    _, _, restored_img = restorer.enhance(
-        img,
-        has_aligned=False,
-        only_center_face=False,
-        paste_back=True
-    )
-    
-    # Save
-    Image.fromarray(restored_img).save(output_path)
-    
-    return output_path
+        
+        # Initialize model
+        restorer = GFPGANer(
+            model_path=None,  # Will download automatically
+            upscale=scale,
+            arch='clean',
+            channel_multiplier=2,
+            bg_upsampler=None  # Don't upscale background separately
+        )
+        
+        # Convert PIL to numpy
+        img_np = np.array(img)
+        
+        # Enhance
+        _, _, output = restorer.enhance(img_np, has_aligned=False, only_center_face=False, paste_back=True)
+        
+        return Image.fromarray(output)
+        
+    except Exception as e:
+        print(f"  ✗ GFPGAN failed: {e}")
+        print("  Falling back to LANCZOS...")
+        return upscale_lanczos(img, scale)
 
 
-def sharpen_unsharp_mask(input_path, output_path, radius=3, percent=200, threshold=3):
+def enhance_clarity(img, strength=1.3):
     """
-    Apply unsharp mask sharpening.
-    This is a fallback if AI tools aren't available.
-    """
-    print(f"  Sharpening with UnsharpMask (radius={radius}, strength={percent}%)...")
+    Enhance clarity using guided filter (edge-preserving smoothing + sharpening).
+    Reduces small noise while enhancing edges.
     
-    img = Image.open(input_path)
-    sharpened = img.filter(ImageFilter.UnsharpMask(
-        radius=radius,
-        percent=percent,
-        threshold=threshold
-    ))
-    sharpened.save(output_path)
-    
-    return output_path
-
-
-def enhance_clarity(input_path, output_path, strength=1.5):
-    """
-    Enhance local contrast and clarity using high-pass filter technique.
+    Args:
+        strength: 0.5-2.0 (higher = more aggressive)
     """
     print(f"  Enhancing clarity (strength={strength})...")
     
-    img = Image.open(input_path).convert('RGB')
-    img_array = np.array(img).astype(np.float32)
+    # Lazy import opencv
+    cv2 = lazy_import('cv2', 'opencv-python')
+    if cv2 is None:
+        print("  ✗ OpenCV unavailable, skipping clarity enhancement")
+        return img
     
-    # Create blurred version
-    blurred = img.filter(ImageFilter.GaussianBlur(radius=5))
-    blurred_array = np.array(blurred).astype(np.float32)
+    # Convert to numpy
+    img_array = np.array(img)
+    img_float = img_array.astype(np.float32) / 255.0
     
-    # High-pass filter (original - blurred)
-    high_pass = img_array - blurred_array
+    # Apply guided filter (edge-preserving smooth)
+    try:
+        smoothed = cv2.ximgproc.guidedFilter(
+            guide=img_float,
+            src=img_float,
+            radius=4,
+            eps=0.01
+        )
+    except AttributeError:
+        # opencv-contrib not installed, use bilateral filter instead
+        img_uint8 = img_array.astype(np.uint8)
+        smoothed = cv2.bilateralFilter(img_uint8, 5, 50, 50).astype(np.float32) / 255.0
     
-    # Add back to original with strength multiplier
-    enhanced = img_array + (high_pass * strength)
-    
-    # Clip to valid range
-    enhanced = np.clip(enhanced, 0, 255).astype(np.uint8)
-    
-    # Save
-    Image.fromarray(enhanced).save(output_path)
-    
-    return output_path
-
-
-def enhance_details_laplacian(input_path, output_path, amount=1.5):
-    """
-    Detail enhancement using Laplacian sharpening.
-    Good for bringing out fine texture.
-    """
-    print(f"  Enhancing details (amount={amount})...")
-    
-    img = Image.open(input_path).convert('RGB')
-    img_array = np.array(img).astype(np.float32) / 255.0
-    
-    from scipy import ndimage
-    
-    # Create Laplacian kernel
-    laplacian_kernel = np.array([
-        [0, -1, 0],
-        [-1, 4, -1],
-        [0, -1, 0]
-    ])
-    
-    # Apply to each channel
-    enhanced = np.zeros_like(img_array)
-    for c in range(3):
-        edges = ndimage.convolve(img_array[:, :, c], laplacian_kernel)
-        enhanced[:, :, c] = img_array[:, :, c] + amount * edges
+    # Enhance by adding back high-frequency details
+    details = img_float - smoothed
+    enhanced = img_float + details * strength
     
     # Clip and convert back
     enhanced = np.clip(enhanced * 255, 0, 255).astype(np.uint8)
+    return Image.fromarray(enhanced)
+
+
+def enhance_details(img, amount=1.2):
+    """
+    Enhance fine details using Laplacian pyramid.
+    Brings out texture without amplifying noise.
     
-    Image.fromarray(enhanced).save(output_path)
+    Args:
+        amount: 0.5-3.0 (higher = more detail)
+    """
+    print(f"  Enhancing details (amount={amount})...")
+    
+    # Lazy import opencv
+    cv2 = lazy_import('cv2', 'opencv-python')
+    if cv2 is None:
+        print("  ✗ OpenCV unavailable, skipping detail enhancement")
+        return img
+    
+    img_array = np.array(img).astype(np.float32)
+    
+    # Create Gaussian pyramid
+    gaussian = [img_array]
+    for _ in range(3):
+        gaussian.append(cv2.pyrDown(gaussian[-1]))
+    
+    # Create Laplacian pyramid
+    laplacian = []
+    for i in range(len(gaussian) - 1):
+        size = (gaussian[i].shape[1], gaussian[i].shape[0])
+        lap = gaussian[i] - cv2.pyrUp(gaussian[i + 1], dstsize=size)
+        laplacian.append(lap * amount)
+    
+    # Reconstruct with enhanced details
+    reconstructed = gaussian[-1]
+    for i in range(len(laplacian) - 1, -1, -1):
+        size = (laplacian[i].shape[1], laplacian[i].shape[0])
+        reconstructed = cv2.pyrUp(reconstructed, dstsize=size) + laplacian[i]
+    
+    reconstructed = np.clip(reconstructed, 0, 255).astype(np.uint8)
+    return Image.fromarray(reconstructed)
+
+
+def sharpen_image(img, radius=2, strength=150):
+    """
+    Final sharpening pass using unsharp mask.
+    
+    Args:
+        radius: 1-5 (blur radius)
+        strength: 50-300 (sharpening percentage)
+    """
+    print(f"  Sharpening with UnsharpMask (radius={radius}, strength={strength}%)...")
+    return img.filter(ImageFilter.UnsharpMask(radius=radius, percent=strength, threshold=3))
+
+
+def ai_enhance_image(
+    input_path,
+    output_path,
+    upscale_factor=4,
+    upscale_method="realesrgan",
+    max_input_size=2048,
+    clarity_strength=1.3,
+    detail_amount=1.2,
+    sharpen_strength=150,
+    auto_fallback=True
+):
+    """
+    Complete AI enhancement pipeline.
+    
+    Args:
+        input_path: Path to input image
+        output_path: Path to save enhanced image
+        upscale_factor: 2, 4, or 8
+        upscale_method: "realesrgan", "lanczos", "waifu2x", "gfpgan"
+        max_input_size: Max dimension before forcing LANCZOS fallback
+        clarity_strength: 0.5-2.0
+        detail_amount: 0.5-3.0
+        sharpen_strength: 50-300
+        auto_fallback: If True, use LANCZOS for oversized images
+    
+    Returns:
+        Path to output file
+    """
+    print(f"\nAI Enhancement Pipeline")
+    print(f"Input: {Path(input_path).name}")
+    print(f"Method: {upscale_method} ({upscale_factor}x upscale)\n")
+    
+    # Load image
+    img = Image.open(input_path).convert('RGB')
+    original_size = (img.width, img.height)
+    print(f"Original size: {img.width}x{img.height}")
+    
+    # Check if image is too large
+    max_dimension = max(img.width, img.height)
+    if max_dimension > max_input_size and auto_fallback:
+        print(f"\n⚠️  WARNING: Image dimension ({max_dimension}px) exceeds maximum ({max_input_size}px)")
+        print(f"⚠️  Large images may cause out-of-memory errors with AI upscaling.")
+        print(f"⚠️  Automatically switching to LANCZOS (fast, memory-safe method).")
+        print(f"⚠️  To upscale large images with AI: increase 'max_input_size' in config\n")
+        upscale_method = "lanczos"
+    
+    # Step 1: Upscale
+    print(f"[1/4] Upscaling {upscale_factor}x...")
+    
+    upscale_functions = {
+        "realesrgan": upscale_realesrgan,
+        "lanczos": upscale_lanczos,
+        "waifu2x": upscale_waifu2x,
+        "gfpgan": upscale_gfpgan
+    }
+    
+    upscale_func = upscale_functions.get(upscale_method.lower(), upscale_realesrgan)
+    img = upscale_func(img, upscale_factor)
+    print(f"  Upscaled to: {img.width}x{img.height}")
+    
+    # Step 2: Clarity Enhancement
+    print(f"[2/4] Clarity Enhancement...")
+    img = enhance_clarity(img, clarity_strength)
+    
+    # Step 3: Detail Enhancement
+    print(f"[3/4] Detail Enhancement...")
+    img = enhance_details(img, detail_amount)
+    
+    # Step 4: Final Sharpening
+    print(f"[4/4] Final Sharpening...")
+    img = sharpen_image(img, radius=2, strength=sharpen_strength)
+    
+    # Save result
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(output_path, 'PNG', quality=100)
+    
+    print(f"\n✅ Enhancement complete!")
+    print(f"   Original: {original_size[0]}x{original_size[1]}")
+    print(f"   Enhanced: {img.width}x{img.height}")
+    print(f"   Saved to: {output_path}\n")
     
     return output_path
 
 
-def full_enhancement_pipeline(
-    input_path,
-    output_path,
-    upscale_factor=4,
-    use_face_restoration=True,
-    use_clarity=True,
-    use_sharpening=True,
-    method="auto"
-):
-    """
-    Complete enhancement pipeline for face segments.
-    
-    Pipeline:
-    1. Upscale (Real-ESRGAN or Pillow)
-    2. Face restoration (GFPGAN/CodeFormer if available)
-    3. Clarity enhancement
-    4. Final sharpening
-    
-    Args:
-        input_path: Input cropped face
-        output_path: Final enhanced output
-        upscale_factor: 2 or 4
-        use_face_restoration: Apply AI face enhancement
-        use_clarity: Apply clarity/detail enhancement
-        use_sharpening: Apply final sharpening
-        method: "auto", "gfpgan", "codeformer", "basic"
-    """
-    print(f"\n{'='*60}")
-    print(f"  AI Enhancement Pipeline")
-    print(f"{'='*60}")
-    
-    input_path = Path(input_path)
-    output_path = Path(output_path)
-    work_dir = output_path.parent / "enhancement_temp"
-    work_dir.mkdir(exist_ok=True)
-    
-    current_file = input_path
-    step = 1
-    
-    try:
-        # STEP 1: Upscale
-        if upscale_factor > 1:
-            print(f"\n[{step}/{5}] Upscaling {upscale_factor}x...")
-            step_output = work_dir / f"step{step}_upscaled.png"
-            
-            # Try Real-ESRGAN first
-            try:
-                from segment_preprocess_cli import upscale_realesrgan
-                upscale_realesrgan(current_file, step_output, upscale_factor)
-            except:
-                print("  Real-ESRGAN not available, using Pillow")
-                from segment_preprocess_cli import upscale_pillow
-                upscale_pillow(current_file, step_output, upscale_factor)
-            
-            current_file = step_output
-            step += 1
-        
-        # STEP 2: Face Restoration
-        if use_face_restoration:
-            print(f"\n[{step}/{5}] AI Face Restoration...")
-            step_output = work_dir / f"step{step}_face_restored.png"
-            
-            if method == "auto":
-                # Try GFPGAN first (easier to install)
-                try:
-                    enhance_with_gfpgan(current_file, step_output)
-                except:
-                    print("  GFPGAN not available, skipping face restoration")
-                    step_output = current_file
-            elif method == "gfpgan":
-                enhance_with_gfpgan(current_file, step_output)
-            elif method == "codeformer":
-                enhance_with_codeformer(current_file, step_output)
-            else:
-                step_output = current_file
-            
-            current_file = step_output
-            step += 1
-        
-        # STEP 3: Clarity Enhancement
-        if use_clarity:
-            print(f"\n[{step}/{5}] Clarity Enhancement...")
-            step_output = work_dir / f"step{step}_clarity.png"
-            enhance_clarity(current_file, step_output, strength=1.3)
-            current_file = step_output
-            step += 1
-        
-        # STEP 4: Detail Enhancement
-        print(f"\n[{step}/{5}] Detail Enhancement...")
-        step_output = work_dir / f"step{step}_details.png"
-        enhance_details_laplacian(current_file, step_output, amount=1.2)
-        current_file = step_output
-        step += 1
-        
-        # STEP 5: Final Sharpening
-        if use_sharpening:
-            print(f"\n[{step}/{5}] Final Sharpening...")
-            sharpen_unsharp_mask(current_file, output_path, radius=2, percent=150, threshold=3)
-        else:
-            shutil.copy2(current_file, output_path)
-        
-        print(f"\n{'='*60}")
-        print(f"[OK] Enhancement complete!")
-        print(f"     Input:  {Image.open(input_path).size}")
-        print(f"     Output: {Image.open(output_path).size}")
-        print(f"     Saved to: {output_path}")
-        print(f"{'='*60}")
-        
-        return output_path
-        
-    finally:
-        # Optional: Clean up temp files
-        # shutil.rmtree(work_dir)
-        pass
-
-
 def main():
-    import argparse
-    
     parser = argparse.ArgumentParser(
-        description="AI Enhancement Pipeline for Face Segments",
+        description="AI-powered image enhancement for depth map optimization",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+Upscaling Methods:
+  realesrgan  - Great general purpose (recommended for photos)
+  lanczos     - Fast! No AI dependencies
+  waifu2x     - Great for anime characters (NOT for photos)
+  gfpgan      - Specialized for faces (portraits only)
+
 Examples:
-  # Full pipeline with all enhancements
-  python ai_enhance.py --input face.png --output face_enhanced.png --upscale 4
+  # Upscale with Real-ESRGAN (best quality)
+  python ai_enhance.py --input photo.jpg --output enhanced.png --upscale 4 --method realesrgan
   
-  # Skip face restoration (if not installed)
-  python ai_enhance.py --input face.png --output face_enhanced.png --no-face-restore
+  # Fast upscale with LANCZOS (no AI)
+  python ai_enhance.py --input photo.jpg --output enhanced.png --upscale 4 --method lanczos
   
-  # Basic enhancement only (no AI)
-  python ai_enhance.py --input face.png --output face_enhanced.png --method basic
+  # Face restoration with GFPGAN
+  python ai_enhance.py --input portrait.jpg --output enhanced.png --upscale 4 --method gfpgan
         """
     )
     
-    parser.add_argument("--input", required=True, help="Input face image")
-    parser.add_argument("--output", required=True, help="Output enhanced image")
-    parser.add_argument("--upscale", type=int, default=4, help="Upscale factor (2 or 4)")
-    parser.add_argument("--no-face-restore", action="store_true", help="Skip AI face restoration")
-    parser.add_argument("--no-clarity", action="store_true", help="Skip clarity enhancement")
-    parser.add_argument("--no-sharpen", action="store_true", help="Skip final sharpening")
-    parser.add_argument("--method", choices=["auto", "gfpgan", "codeformer", "basic"], 
-                       default="auto", help="Enhancement method")
+    parser.add_argument("--input", required=True, help="Input image path")
+    parser.add_argument("--output", required=True, help="Output image path")
+    parser.add_argument("--upscale", type=int, default=4, choices=[2, 4, 8],
+                       help="Upscale factor (default: 4)")
+    parser.add_argument("--method", default="realesrgan",
+                       choices=["realesrgan", "lanczos", "waifu2x", "gfpgan"],
+                       help="Upscaling method (default: realesrgan)")
+    parser.add_argument("--max-size", type=int, default=2048,
+                       help="Max input dimension before forcing LANCZOS (default: 2048)")
+    parser.add_argument("--clarity", type=float, default=1.3,
+                       help="Clarity enhancement strength (default: 1.3)")
+    parser.add_argument("--detail", type=float, default=1.2,
+                       help="Detail enhancement amount (default: 1.2)")
+    parser.add_argument("--sharpen", type=int, default=150,
+                       help="Sharpening strength (default: 150)")
+    parser.add_argument("--no-fallback", action='store_true',
+                       help="Disable automatic LANCZOS fallback for large images")
     
     args = parser.parse_args()
     
     try:
-        full_enhancement_pipeline(
+        ai_enhance_image(
             args.input,
             args.output,
             upscale_factor=args.upscale,
-            use_face_restoration=not args.no_face_restore,
-            use_clarity=not args.no_clarity,
-            use_sharpening=not args.no_sharpen,
-            method=args.method
+            upscale_method=args.method,
+            max_input_size=args.max_size,
+            clarity_strength=args.clarity,
+            detail_amount=args.detail,
+            sharpen_strength=args.sharpen,
+            auto_fallback=not args.no_fallback
         )
     except Exception as e:
-        print(f"\n[ERROR] {e}")
+        print(f"\n❌ Error: {e}")
         import traceback
         traceback.print_exc()
-        return 1
-    
-    return 0
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    exit(main())
+    main()

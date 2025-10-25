@@ -26,18 +26,18 @@ dir_3d: "../data/3D_files"                # All 3D outputs
 dir_enhanced: "../data/Photos_enhanced"   # Enhanced photos cache
 
 # ----------------------------------------
-# AI Image Generation
+# AI Image Generation Prompts
 # ----------------------------------------
 prompts_file: "prompts.json"           # Path to prompt templates (relative to pipeline/)
 default_prompt_view: "side_profile"    # Default view type
 default_prompt_style: "standard"       # Default style
+allow_custom_prompts: true       # Allow users to enter full custom prompts
 
 # ----------------------------------------
 # Photo Enhancement (Auto-Applied)
 # ----------------------------------------
 auto_enhance_photos: true                 # Auto-enhance photos from photos/ folder
 auto_enhance_preset: "minimal"            # Options: "none", "minimal", "balanced", "heavy"
-# Note: AI images skip enhancement (already optimized)
 
 # ----------------------------------------
 # Background Removal
@@ -61,6 +61,18 @@ triposr_settings:
   marching_cubes_resolution: 256
   target_faces: 50000
   device: "cuda"
+
+# ----------------------------------------
+# Segment Processing (for cropped regions)
+# ----------------------------------------
+segment_processing:
+  enabled: false                    # Enable for manual segment workflow
+  upscale_before_depth: true        # AI upscale segments
+  upscale_factor: 4                 # 2x or 4x
+  upscale_method: "auto"            # "auto", "realesrgan", "pillow"
+  use_native_resolution: true       # Don't downscale in Marigold
+  add_context_padding: true         # Add blurred background for context
+  padding_percent: 10               # % of image to add as padding
 
 # ----------------------------------------
 # Marigold Depth Generation Presets
@@ -89,6 +101,14 @@ marigold_presets:
     marigold_enhance_photo: false
 
 # ----------------------------------------
+# Marigold Depth Generation
+# ----------------------------------------
+marigold_background_color: "white"  # Options: "gray", "white", "black", "light_gray", "dark_gray", or hex "#RRGGBB"
+# Gray (128,128,128) = neutral mid-depth
+# White (255,255,255) = far depth (background recedes)
+# Black (0,0,0) = near depth (background comes forward)
+
+# ----------------------------------------
 # 3D Extrusion Parameters
 # ----------------------------------------
 extrude_defaults:
@@ -98,13 +118,17 @@ extrude_defaults:
   near_offset: 0.0
   far_offset: 1
   emboss: 0.2
-  f_thic: 0.00
+  f_thic: 0.0
   f_near: -0.0
-  f_back: 0.00
+  f_back: 0.05
   vertex_colors: false
   scene_lights: false
   prepare_for_3d_printing: true
   zip_outputs: false
+  # Output formats (at least one must be true)
+  output_stl: true          # STL format (3D printing standard)
+  output_glb: false         # GLB format (web viewing, has colors/lights)
+  output_obj: false         # OBJ format (widely supported)
 
 # ----------------------------------------
 # Region-Specific Processing
@@ -151,22 +175,56 @@ region_processing:
       match_input_res: false
 
 # ----------------------------------------
-# Advanced Post-Processing (NEW)
+# Mesh Repair & Optimization
 # ----------------------------------------
-enable_advanced_postprocessing: false      # Apply MakerWorld-style mesh optimization
-postprocessing_settings:
-  relief_height_mm: 10.0                  # Target relief height
-  base_thickness_mm: 2.0                  # Base plate thickness
-  target_faces: 50000                     # Face count after decimation
-  smoothing_iterations: 2                 # Surface smoothing passes
-  repair_mesh: true                       # Fix non-manifold edges, holes, etc.
-  save_intermediate: true                 # Keep both raw and optimized STLs
+enable_mesh_repair: "auto"
+trim_borders_before_repair: false
+mesh_repair_settings:
+  smooth_iterations: 1           # Keep minimal
+  target_faces: 0                # No decimation by default
+  fill_holes: false              # CHANGED: Don't fill holes in relief models
+  ensure_manifold: false         # CHANGED: Relief models aren't manifold volumes
+  save_before_repair: true
+
+# Quality-dependent repair rules
+mesh_repair_by_quality:
+  low_quality:
+    enabled: false
+  medium_quality:
+    enabled: false
+    smooth_iterations: 1         # REDUCED from 2
+    target_faces: 100000
+    fill_holes: false            # ADDED
+    ensure_manifold: false       # ADDED
+  high_quality:
+    enabled: true
+    smooth_iterations: 1         # REDUCED from 2
+    target_faces: 200000
+    fill_holes: false            # ADDED
+    ensure_manifold: false       # ADDED
 
 # ----------------------------------------
-# Output File Formats
+# AI Enhancement (before depth generation)
 # ----------------------------------------
-export_formats:
-  stl: true                               # Always needed for CNC
-  glb: false                              # Set true if you want GLB files
-  obj: false                              # Set true if you want OBJ files
-delete_source_after_processing: true      # Deletes original file
+ai_enhancement:
+  enabled: true  # Set to false to skip AI enhancement
+  
+  # Upscaling method
+  upscale_method: "realesrgan"  # Great general purpose
+  #upscale_method: "lanczos"  # Fast!
+  #upscale_method: "waifu2x"  # Great for anime characters
+  #upscale_method: "gfpgan"  # Specialized for faces
+  
+  upscale_factor: 4  # Options: 2, 4, or 8 (higher = slower, more detail)
+  max_input_size: 2048  # Max dimension before auto-switching to LANCZOS (prevents OOM)
+  
+  # Enhancement parameters
+  clarity_strength: 1.3  # 0.5-2.0 (edge-preserving smoothing)
+  detail_amount: 1.2     # 0.5-3.0 (fine detail enhancement)
+  sharpen_strength: 150  # 50-300 (final sharpening pass)
+  
+  # Auto-install missing dependencies
+  auto_install_dependencies: true  # If false, fail instead of auto-installing
+
+
+delete_source_after_processing: false      # Deletes original file

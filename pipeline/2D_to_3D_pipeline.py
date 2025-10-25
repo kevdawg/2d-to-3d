@@ -21,6 +21,7 @@ import platform
 from rembg import remove
 from PIL import Image
 import trimesh
+import json
 import numpy as np
 
 # Add scripts directory to Python path
@@ -197,6 +198,38 @@ def run_cmd(cmd_list, show_timer=False, timer_message="Processing"):
         print(f"  {ERR} {err_msg}")
         raise RuntimeError(err_msg)
 
+def log_command_to_file(output_dir: Path, command_name: str, cmd_list: list, description: str = ""):
+    """
+    Log a command to the project's command history file.
+    
+    Args:
+        output_dir: Project output directory
+        command_name: Name of command (e.g., "marigold", "extrude")
+        cmd_list: Full command as list
+        description: Optional description
+    """
+    log_file = output_dir / "commands.txt"
+    
+    # Convert command list to properly quoted string
+    quoted_cmd = []
+    for part in cmd_list:
+        part_str = str(part)
+        # Quote paths and arguments with spaces
+        if ' ' in part_str or '\\' in part_str:
+            quoted_cmd.append(f'"{part_str}"')
+        else:
+            quoted_cmd.append(part_str)
+    
+    cmd_string = ' '.join(quoted_cmd)
+    
+    # Append to log file
+    with open(log_file, 'a', encoding='utf-8') as f:
+        if description:
+            f.write(f"\n# {description}\n")
+        f.write(f"# {command_name.upper()}\n")
+        f.write(f"{cmd_string}\n")
+    
+    print(f"  📝 Command logged to: {log_file.name}")
 
 def conda_prefix_cmd(env_name, cmd_list):
     """Return a full command list that runs cmd_list inside conda env."""
@@ -365,56 +398,151 @@ def generate_via_imagen3(user_desc: str, filename_out: Path):
 # ============================================
 
 def generate_ai_image_menu():
-    """Submenu for AI image generation."""
+    """Submenu for AI image generation with prompt style selection."""
     
+    # Load prompts
+    prompts_data = load_prompts()
+    prompts = prompts_data["prompts"]
+    default_prompt = prompts_data.get("default_prompt", "side_profile")
+    allow_custom = cfg.get("allow_custom_prompts", True)
+    
+    while True:
+        print(f"\n{'─'*60}")
+        print("SELECT PROMPT STYLE")
+        print('─'*60)
+        
+        # List available prompt styles
+        prompt_keys = list(prompts.keys())
+        for i, key in enumerate(prompt_keys, 1):
+            prompt = prompts[key]
+            marker = " (Default)" if key == default_prompt else ""
+            print(f"  {i}. {prompt['name']}{marker}")
+            print(f"     └─ {prompt['description']}")
+        
+        # Add custom option if enabled
+        custom_option = len(prompt_keys) + 1
+        back_option = custom_option + 1
+        
+        if allow_custom:
+            custom_info = prompts_data.get("custom_prompt_template", {})
+            print(f"  {custom_option}. {custom_info.get('name', 'Custom Prompt')}")
+            print(f"     └─ {custom_info.get('description', 'Enter your own description')}")
+        
+        print(f"  {back_option}. Back to main menu")
+        print('─'*60)
+        
+        choice = input(f"\nSelect prompt style [1-{back_option}]: ").strip()
+        
+        try:
+            choice_num = int(choice)
+            
+            # Back
+            if choice_num == back_option:
+                return
+            
+            # Custom prompt
+            if allow_custom and choice_num == custom_option:
+                selected_style = "custom"
+            # Standard prompt
+            elif 1 <= choice_num <= len(prompt_keys):
+                selected_style = prompt_keys[choice_num - 1]
+            else:
+                print(f"\n{ERR} Invalid selection")
+                continue
+            
+            # Now get subject and AI model
+            generate_with_prompt_style(selected_style, prompts_data)
+            
+        except ValueError:
+            print(f"\n{ERR} Invalid input")
+
+
+def generate_with_prompt_style(prompt_style: str, prompts_data: dict):
+    """
+    Generate image with selected prompt style.
+    
+    Args:
+        prompt_style: Selected prompt key or "custom"
+        prompts_data: Loaded prompts configuration
+    """
     print(f"\n{'─'*60}")
-    print("GENERATE AI IMAGE")
+    if prompt_style == "custom":
+        print("CUSTOM PROMPT")
+    else:
+        prompt_info = prompts_data["prompts"][prompt_style]
+        print(f"{prompt_info['name'].upper()}")
+    print('─'*60)
+    
+    # Get subject description
+    if prompt_style == "custom":
+        subject = input("\nEnter full prompt (or 'cancel'): ").strip()
+    else:
+        subject = input("\nEnter subject description (e.g., 'jumping frog') or 'cancel': ").strip()
+    
+    if subject.lower() == "cancel":
+        return
+    
+    # Build full prompt
+    full_prompt = build_full_prompt(subject, prompt_style, prompts_data)
+    
+    # Show preview of what will be generated
+    print(f"\n📝 Generated prompt preview:")
+    preview = full_prompt[:150] + "..." if len(full_prompt) > 150 else full_prompt
+    print(f"   {preview}")
+    
+    confirm = input("\nContinue with this prompt? [Y/n]: ").strip().lower()
+    if confirm and confirm not in ['y', 'yes', '']:
+        return
+    
+    # Select AI model
+    print(f"\n{'─'*60}")
+    print("SELECT AI MODEL")
     print('─'*60)
     print("  1. Gemini (FREE, basic quality)")
-    print("  2. Imagen ($0.04, high quality)")
-    print("  3. Back to main menu")
+    print("  2. Imagen 3 ($0.04, high quality)")
+    print("  3. Cancel")
     print('─'*60)
     
-    choice = input("\nSelect option [1-3]: ").strip()
+    model_choice = input("\nSelect model [1-3]: ").strip()
     
-    if choice == "1":
-        generate_with_gemini_interactive()
-    elif choice == "2":
-        generate_with_aigen_interactive()
-    elif choice == "3":
+    if model_choice == "1":
+        generate_image_interactive(full_prompt, "gemini")
+    elif model_choice == "2":
+        generate_image_interactive(full_prompt, "imagen")
+    elif model_choice == "3":
         return
     else:
-        print(f"\n{ERR} Invalid option.")
-        generate_ai_image_menu()
+        print(f"\n{ERR} Invalid option")
 
 
-def generate_with_gemini_interactive():
-    """Interactive Gemini image generation."""
+def generate_image_interactive(full_prompt: str, model: str):
+    """
+    Generate image with specified model and prompt.
     
-    print(f"\n{'─'*60}")
-    print("GENERATE WITH GEMINI (FREE)")
-    print('─'*60)
-    
-    prompt = input("\nEnter image description (or 'cancel'): ").strip()
-    if prompt.lower() == "cancel":
-        return
-    
-    # Create safe filename from prompt
-    safe_prompt = "".join([c if c.isalnum() or c in ("-", "_", " ") else "_" for c in prompt])
-    safe_prompt = safe_prompt.strip().replace(" ", "_")[:50]
+    Args:
+        full_prompt: Complete formatted prompt
+        model: "gemini" or "imagen"
+    """
+    # Create safe filename from first few words of prompt
+    words = full_prompt.split()[:5]
+    safe_name = "_".join([w for w in words if w.isalnum()])[:50]
     
     # Check if output file already exists
-    out_path = DIR_AI_GENERATED / f"{safe_prompt}.png"
+    out_path = DIR_AI_GENERATED / f"{safe_name}.png"
     counter = 2
     while out_path.exists():
-        out_path = DIR_AI_GENERATED / f"{safe_prompt}_{counter}.png"
+        out_path = DIR_AI_GENERATED / f"{safe_name}_{counter}.png"
         counter += 1
     
     try:
         start_time = time.time()
         
-        print(f"\nGenerating with Gemini (FREE tier)...")
-        generate_via_gemini(prompt, out_path)
+        print(f"\nGenerating with {model.title()}...")
+        
+        if model == "gemini":
+            generate_via_gemini(full_prompt, out_path)
+        else:  # imagen
+            generate_via_imagen3(full_prompt, out_path)
         
         # Show timing
         elapsed = time.time() - start_time
@@ -423,56 +551,18 @@ def generate_with_gemini_interactive():
         
         print(f"\n{OK} Image saved: {out_path.name}")
         print(f"   Generation time: {time_str}")
-        print(f"   Saved to: AI_files/{out_path.name}")
+        if model == "imagen":
+            print(f"   Cost: ~$0.04")
         
     except Exception as e:
         print(f"\n{ERR} Image generation failed: {e}")
+        import traceback
+        traceback.print_exc()
     
     input("\nPress Enter to continue...")
 
 
-def generate_with_aigen_interactive():
-    """Interactive Imagen 3 image generation."""
-    
-    print(f"\n{'─'*60}")
-    print("GENERATE WITH AIGEN 3 ($0.04)")
-    print('─'*60)
-    
-    prompt = input("\nEnter image description (or 'cancel'): ").strip()
-    if prompt.lower() == "cancel":
-        return
-    
-    # Create safe filename from prompt
-    safe_prompt = "".join([c if c.isalnum() or c in ("-", "_", " ") else "_" for c in prompt])
-    safe_prompt = safe_prompt.strip().replace(" ", "_")[:50]
-    
-    # Check if output file already exists
-    out_path = DIR_AI_GENERATED / f"{safe_prompt}.png"
-    counter = 2
-    while out_path.exists():
-        out_path = DIR_AI_GENERATED / f"{safe_prompt}_{counter}.png"
-        counter += 1
-    
-    try:
-        start_time = time.time()
-        
-        print(f"\nGenerating with Imagen 3 (high quality)...")
-        generate_via_imagen3(prompt, out_path)
-        
-        # Show timing
-        elapsed = time.time() - start_time
-        mins, secs = divmod(int(elapsed), 60)
-        time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
-        
-        print(f"\n{OK} Image saved: {out_path.name}")
-        print(f"   Generation time: {time_str}")
-        print(f"   Cost: ~$0.04")
-        print(f"   Saved to: AI_files/{out_path.name}")
-        
-    except Exception as e:
-        print(f"\n{ERR} Image generation failed: {e}")
-    
-    input("\nPress Enter to continue...")
+
         
 
 def run_marigold_cli(image_path: Path, depth_out: Path, marigold_opts: dict):
@@ -499,11 +589,20 @@ def run_marigold_cli(image_path: Path, depth_out: Path, marigold_opts: dict):
     
     if marigold_opts.get("marigold_resume", False):
         cmd.append("--resume")
+
+    # Log command to project file
+    if depth_out.parent.exists():
+        log_command_to_file(
+            depth_out.parent,
+            "marigold",
+            cmd,
+            f"Generate depth map from {image_path.name}"
+        )
     
-    # ADD THIS: Show exact command for manual testing
-    print(f"\n💻 Marigold command:")
-    print(f"   {' '.join(cmd)}")
-    print()
+    # Show command
+    #print(f"\n💻 Marigold command:")
+    #print(f"   {' '.join(cmd)}")
+    #print()
     
     full = conda_prefix_cmd(MARIGOLD_ENV, cmd)
     
@@ -665,18 +764,27 @@ def run_extrude_cli(depth_path: Path, stl_out: Path, extrude_params: dict):
            "--near_offset", str(extrude_params.get("near_offset", 0.0)),
            "--far_offset", str(extrude_params.get("far_offset", 1.0)),
            "--emboss", str(extrude_params.get("emboss", 0.3)),
-           "--f_thic", str(extrude_params.get("f_thic", 0.05)),
-           "--f_near", str(extrude_params.get("f_near", -0.15)),
+           "--f_thic", str(extrude_params.get("f_thic", 0.00)),
+           "--f_near", str(extrude_params.get("f_near", -0.0)),
            "--f_back", str(extrude_params.get("f_back", 0.01)),
            "--vertex_colors", str(extrude_params.get("vertex_colors", True)),
            "--scene_lights", str(extrude_params.get("scene_lights", True)),
            "--prepare_for_3d_printing", str(extrude_params.get("prepare_for_3d_printing", False)),
            "--zip_outputs", str(extrude_params.get("zip_outputs", False))]
 
-    # Print extrude_cli.py command to window for the user
-    print(f"\n💻 Extrusion command:")
-    print(f"   {' '.join(cmd)}")
-    print()
+    # Log command to project file
+    if stl_out.parent.exists():
+        log_command_to_file(
+            stl_out.parent,
+            "extrude",
+            cmd,
+            f"Convert depth map to 3D model"
+        )
+    
+    # Show command
+    #print(f"\n💻 Extrusion command:")
+    #print(f"   {' '.join(cmd)}")
+    #print()
 
     full = conda_prefix_cmd(DEPTH_ENV, cmd)
     
@@ -697,70 +805,85 @@ def process_single(image_path: Path, marigold_opts: dict, extrude_opts: dict, fi
         counter_str = f"[{file_counter}] " if file_counter else ""
         print(f"\n{'='*60}\n{counter_str}Processing: {image_path.name}\n{'='*60}")
         
-        if REMOVE_BACKGROUND:
-            print(f"Background removal: ENABLED ({BG_REMOVAL_METHOD})")
-        else:
-            print(f"Background removal: DISABLED")
-        
         # Create safe folder name with quality suffix
         name = safe_name_from_file(image_path)
         name_with_quality = f"{name}_{quality_preset}"
         run_dir = DIR_3D / name_with_quality
         run_dir.mkdir(parents=True, exist_ok=True)
         
-        # STEP 1: Remove background if enabled
         working_image = image_path
+        
+        ai_config = cfg.get("ai_enhancement", {})
+        if ai_config.get("enabled", False):
+            print(f"🤖 AI Enhancement...")
+            enhanced_path = run_dir / f"{name_with_quality}_ai_enhanced.png"
+            
+            # Import the function
+            sys.path.insert(0, str(SCRIPTS_DIR / "photo_preprocessing"))
+            from ai_enhance import ai_enhance_image
+            
+            try:
+                log_command_to_file(
+                    f"python scripts/photo_preprocessing/ai_enhance.py "
+                    f"--input \"{working_image}\" "
+                    f"--output \"{enhanced_path}\" "
+                    f"--upscale {ai_config.get('upscale_factor', 4)} "
+                    f"--method {ai_config.get('upscale_method', 'realesrgan')} "
+                    f"--max-size {ai_config.get('max_input_size', 2048)} "
+                    f"--clarity {ai_config.get('clarity_strength', 1.3)} "
+                    f"--detail {ai_config.get('detail_amount', 1.2)} "
+                    f"--sharpen {ai_config.get('sharpen_strength', 150)}"
+                )
+                
+                ai_enhance_image(
+                    str(working_image),
+                    str(enhanced_path),
+                    upscale_factor=ai_config.get("upscale_factor", 4),
+                    upscale_method=ai_config.get("upscale_method", "realesrgan"),
+                    max_input_size=ai_config.get("max_input_size", 2048),
+                    clarity_strength=ai_config.get("clarity_strength", 1.3),
+                    detail_amount=ai_config.get("detail_amount", 1.2),
+                    sharpen_strength=ai_config.get("sharpen_strength", 150),
+                    auto_fallback=True
+                )
+                working_image = enhanced_path
+                print(f"  ✓ AI enhanced: {enhanced_path.name}")
+            except Exception as e:
+                print(f"  ⚠️ AI enhancement failed: {e}")
+                print(f"  ⚠️ Continuing with original image...")
+                import traceback
+                traceback.print_exc()
+        else:
+            print(f"🤖 AI Enhancement: DISABLED")
+        
+        # Continue with existing background removal step...
         if REMOVE_BACKGROUND:
+            print(f"🎭 Removing background...")
+        
+        # STEP 2: Remove background if enabled
+        if REMOVE_BACKGROUND:
+            print(f"\n{'='*60}\nSTEP 2: Background Removal\n{'='*60}")
             nobg_path = run_dir / f"{name_with_quality}_nobg.png"
-            working_image = remove_background_if_enabled(image_path, nobg_path)
-            # Copy cleaned image as "original" to output folder
+            working_image = remove_background_if_enabled(working_image, nobg_path)
             shutil.copy2(working_image, run_dir / f"{name_with_quality}_original.png")
         else:
-            # Copy original to output folder
             shutil.copy2(image_path, run_dir / image_path.name)
-
-        # Define output paths
+        
+        # STEP 3: Run Marigold (depth only)
+        print(f"\n{'='*60}\nSTEP 3: Depth Map Generation\n{'='*60}")
         depth_out = run_dir / f"{name_with_quality}_depth_16bit.png"
+        run_marigold_cli(working_image, depth_out, marigold_opts)
 
-        # STEP 2: Prepare image for Marigold (composite transparent images onto neutral background)
-        if REMOVE_BACKGROUND:
-            prepared_path = run_dir / f"{name_with_quality}_prepared.png"
-            
-            # Open image
-            img = Image.open(working_image)
-            
-            # Check if has alpha channel
-            if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
-                print(f"  Compositing onto neutral background for Marigold...")
-                
-                # Convert to RGBA
-                if img.mode != 'RGBA':
-                    img = img.convert('RGBA')
-                
-                # Create gray background (neutral for depth)
-                background = Image.new('RGBA', img.size, (128, 128, 128, 255))
-                
-                # Composite
-                composited = Image.alpha_composite(background, img)
-                
-                # Convert to RGB
-                rgb_img = composited.convert('RGB')
-                rgb_img.save(prepared_path)
-                
-                marigold_input = prepared_path
-                print(f"  ✓ Prepared: {prepared_path.name}")
-            else:
-                marigold_input = working_image
-        else:
-            marigold_input = working_image
+        # STEP 4: Mask depth map with alpha channel
+        if REMOVE_BACKGROUND and working_image.suffix.lower() == '.png':
+            try:
+                mask_depth_with_alpha(depth_out, working_image)
+            except Exception as e:
+                print(f"  {WARN} Could not mask depth map: {e}")
+                print(f"  {WARN} Continuing with unmasked depth...")
 
-        # STEP 3: Run Marigold (with regional processing if enabled)
-        if cfg.get('region_processing', {}).get('enabled', False):
-            run_marigold_with_regions(marigold_input, depth_out, cfg)
-        else:
-            run_marigold_cli(marigold_input, depth_out, marigold_opts)
-
-        # STEP 4: Run extrusion
+        # STEP 5: Run extrusion
+        print(f"\n{'='*60}\nSTEP 4: 3D Model Generation\n{'='*60}")
         stl_out = run_dir / f"{name_with_quality}.stl"
         run_extrude_cli(depth_out, stl_out, extrude_opts)
         
@@ -1254,8 +1377,21 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
     if REMOVE_BACKGROUND:
         print(f"\n🎭 Removing background...")
         nobg_path = output_dir / f"{project_name}_nobg.png"
+        
+        # Log rembg command
+        rembg_cmd = [
+            "rembg", "i",
+            str(working_image),
+            str(nobg_path)
+        ]
+        log_command_to_file(
+            output_dir,
+            "background_removal",
+            rembg_cmd,
+            "Remove background with rembg"
+        )
+        
         working_image = remove_background_if_enabled(working_image, nobg_path)
-        print(f"  DEBUG: After bg removal, working_image = {working_image.name}")
     
     # Copy source to output
     shutil.copy2(working_image, output_dir / "source.png")
@@ -1264,37 +1400,54 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
     marigold_input = working_image
     
     if REMOVE_BACKGROUND:
-        # Check if image has transparency
         img = Image.open(working_image)
         
         if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
-            print(f"  Compositing transparent image onto neutral background...")
+            # Get background color from config
+            bg_color = cfg.get("marigold_background_color", "gray")
             
-            # Convert to RGBA if needed
+            # Map color names to RGB values
+            bg_colors = {
+                "gray": (128, 128, 128),
+                "grey": (128, 128, 128),
+                "white": (255, 255, 255),
+                "black": (0, 0, 0),
+                "light_gray": (192, 192, 192),
+                "dark_gray": (64, 64, 64)
+            }
+            
+            if bg_color in bg_colors:
+                bg_rgb = bg_colors[bg_color]
+            else:
+                # Try to parse as RGB tuple or hex
+                try:
+                    if isinstance(bg_color, str) and bg_color.startswith('#'):
+                        # Hex color
+                        bg_rgb = tuple(int(bg_color[i:i+2], 16) for i in (1, 3, 5))
+                    else:
+                        # Default to gray
+                        bg_rgb = (128, 128, 128)
+                except:
+                    bg_rgb = (128, 128, 128)
+            
+            print(f"  Compositing onto {bg_color} background {bg_rgb}...")
+            
             if img.mode != 'RGBA':
                 img = img.convert('RGBA')
             
-            # Create neutral gray background (128, 128, 128)
-            background = Image.new('RGB', img.size, (128, 128, 128))
-            
-            # Paste image onto background using alpha as mask
+            background = Image.new('RGB', img.size, bg_rgb)
             background.paste(img, (0, 0), img)
             
-            # VERIFY it's RGB and has valid data
-            print(f"  DEBUG: Composited image mode: {background.mode}")
-            print(f"  DEBUG: Composited image size: {background.size}")
-            arr = np.array(background)
-            print(f"  DEBUG: Pixel value range: {arr.min()} - {arr.max()}")
-            print(f"  DEBUG: Mean pixel value: {arr.mean():.1f}")
-            
-            # Save composited version - ENSURE IT'S RGB
             prepared_path = output_dir / f"{project_name}_prepared_for_marigold.png"
             background.save(prepared_path, 'PNG')
             
-            # VERIFY the saved file
-            verify = Image.open(prepared_path)
-            print(f"  DEBUG: Saved file mode: {verify.mode}")
-            print(f"  DEBUG: Saved file size: {verify.size}")
+            # Log the compositing step
+            log_command_to_file(
+                output_dir,
+                "composite_background",
+                ["# Composited with background color:", str(bg_rgb)],
+                f"Applied {bg_color} background before Marigold"
+            )
             
             marigold_input = prepared_path
             print(f"  ✓ Prepared: {prepared_path.name}")
@@ -1318,54 +1471,104 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
         run_marigold_cli(marigold_input, depth_path, marigold_opts)
     
     
-   # STEP 6: Extrude to 3D model
+    # STEP 6: Extrude to 3D model
     stl_raw_path = output_dir / f"{project_name}_raw.stl"
     run_extrude_cli(depth_path, stl_raw_path, EXTRUDE_DEFAULTS)
     
-    # STEP 7: Advanced post-processing (if enabled)
-    if cfg.get("enable_advanced_postprocessing", False):
-        print(f"\n✨ Applying advanced post-processing...")
+    # STEP 7: Trim borders (if enabled and needed)
+    stl_for_repair = stl_raw_path
+    
+    if cfg.get("trim_borders_before_repair", False):
+        print(f"\n✂️ Trimming border frame...")
         
-        from mesh_postprocess_advanced import advanced_postprocess_pipeline
+        stl_trimmed_path = output_dir / f"{project_name}_trimmed.stl"
         
-        stl_final_path = output_dir / f"{project_name}_final.stl"
+        # Call trim script via subprocess (runs in depth-to-3d env where trimesh is)
+        trim_script = SCRIPTS_DIR / "model_generation" / "trim_borders.py"
         
-        pp_settings = cfg.get("postprocessing_settings", {})
-        
-        advanced_postprocess_pipeline(
-            str(stl_raw_path),
-            str(stl_final_path),
-            relief_height_mm=pp_settings.get("relief_height_mm", 10.0),
-            base_thickness_mm=pp_settings.get("base_thickness_mm", 2.0),
-            target_faces=pp_settings.get("target_faces", 50000),
-            smoothing_iterations=pp_settings.get("smoothing_iterations", 2),
-            repair=pp_settings.get("repair_mesh", True)
-        )
-        
-        print(f"\n{OK} Post-processing complete!")
-        print(f"   Raw model:   {stl_raw_path.name}")
-        print(f"   Final model: {stl_final_path.name}")
+        if not trim_script.exists():
+            print(f"  {WARN} trim_borders.py not found, skipping trim")
+            stl_for_repair = stl_raw_path
+        else:
+            cmd = ["python", str(trim_script),
+                   "--input", str(stl_raw_path),
+                   "--output", str(stl_trimmed_path)]
+            
+            full_cmd = conda_prefix_cmd(DEPTH_ENV, cmd)
+            
+            try:
+                rc, output = run_cmd(full_cmd)
+                
+                if rc == 0:
+                    stl_for_repair = stl_trimmed_path
+                    print(f"  {OK} Borders trimmed: {stl_trimmed_path.name}")
+                else:
+                    print(f"  {WARN} Border trimming failed")
+                    stl_for_repair = stl_raw_path
+                    
+            except Exception as e:
+                print(f"  {WARN} Border trimming error: {e}")
+                stl_for_repair = stl_raw_path
     else:
-        stl_final_path = stl_raw_path
-        print(f"\n Post-processing disabled (enable in config.yaml)")
+        stl_for_repair = stl_raw_path
     
-    # STEP 8: Export additional formats (if enabled)
-    export_formats = cfg.get("export_formats", {"stl": True, "glb": False, "obj": False})
+    # STEP 8: Mesh repair (quality-dependent)
+    from mesh_postprocess import should_repair_for_quality, repair_mesh_via_subprocess
     
-    if export_formats.get("glb", False) or export_formats.get("obj", False):
-        import trimesh
-        mesh = trimesh.load(stl_final_path)
+    should_repair, repair_settings = should_repair_for_quality(quality_preset, cfg)
+    
+    if should_repair:
+        print(f"\n🔧 Mesh repair enabled for {quality_preset.replace('_', ' ')}")
         
-        if export_formats.get("glb", False):
-            glb_path = output_dir / f"{project_name}.glb"
-            mesh.export(glb_path, file_type="glb")
-            print(f"   Exported: {glb_path.name}")
+        stl_final_path = output_dir / f"{project_name}.stl"
         
-        if export_formats.get("obj", False):
-            obj_path = output_dir / f"{project_name}.obj"
-            mesh.export(obj_path, file_type="obj")
-            print(f"   Exported: {obj_path.name}")
+        try:
+            repair_mesh_via_subprocess(
+                stl_for_repair,  # CHANGED: Use trimmed mesh if available
+                stl_final_path, 
+                repair_settings,
+                CONDA_EXE,
+                DEPTH_ENV
+            )
+            print(f"  {OK} Mesh repaired: {stl_final_path.name}")
+            
+            # Optionally keep raw version
+            if cfg.get("mesh_repair_settings", {}).get("save_before_repair", True):
+                print(f"  {INFO} Raw mesh saved: {stl_raw_path.name}")
+            
+        except Exception as e:
+            print(f"  {ERR} Mesh repair failed: {e}")
+            print(f"  {INFO} Using untrimmed mesh")
+            stl_final_path = stl_raw_path
+    else:
+        print(f"\n{INFO} Mesh repair disabled for {quality_preset.replace('_', ' ')}")
+        stl_final_path = stl_for_repair  # CHANGED: Use trimmed if available
+
+    output_formats = {
+        'stl': EXTRUDE_DEFAULTS.get('output_stl', True),
+        'glb': EXTRUDE_DEFAULTS.get('output_glb', False),
+        'obj': EXTRUDE_DEFAULTS.get('output_obj', False)
+    }
     
+    # Delete unwanted formats
+    #run_dir = DIR_3D / project_name.name
+    print(f"{project_name}")
+    base_path = DIR_3D / f"{project_name}"
+    for fmt, keep in output_formats.items():
+        if not keep:
+            file_path = base_path.with_suffix(f'.{fmt}')
+            if file_path.exists():
+                file_path.unlink()
+                print(f"  🗑️ Removed unwanted format: {file_path.name}")
+    
+    # Clean up source file if configured
+    if cfg.get("delete_source_after_processing", False):
+        try:
+            image_path.unlink()
+            print(f"   {TRASH} Deleted source file")
+        except:
+            pass
+
     # Calculate total time
     elapsed = time.time() - start_time
     mins, secs = divmod(int(elapsed), 60)
@@ -1376,15 +1579,7 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
     print(f"   Output: {output_dir.name}/")
     print(f"   Total time: {time_str}")
     print(f"{'='*60}")
-    
-    # Clean up source file if configured
-    if cfg.get("delete_source_after_processing", False):
-        try:
-            image_path.unlink()
-            print(f"   {TRASH} Deleted source file")
-        except:
-            pass
-    
+
     input("\nPress Enter to continue...")
 
 
@@ -1543,7 +1738,6 @@ def list_image_files(directory):
     valid_extensions = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"}
     files = []
     
-    # Make sure directory exists
     if not directory.exists():
         print(f"  ⚠️ Directory does not exist: {directory}")
         return files
@@ -1553,6 +1747,77 @@ def list_image_files(directory):
             files.append(p)
     
     return sorted(files)
+
+
+# ADD THIS NEW FUNCTION HERE:
+def load_prompts():
+    """
+    Load prompt templates from prompts.json.
+    Returns dict with prompt templates and base quality settings.
+    """
+    prompts_path = HERE / cfg.get("prompts_file", "prompts.json")
+    
+    if not prompts_path.exists():
+        print(f"  {WARN} prompts.json not found, using minimal defaults")
+        # Return minimal default structure
+        return {
+            "base_template": {
+                "prefix": "Grayscale, photorealistic, suitable for bas relief.",
+                "suffix": "High quality, detailed.",
+                "negative": "color, blur, low quality"
+            },
+            "prompts": {
+                "default": {
+                    "name": "Default",
+                    "description": "Standard view",
+                    "view_description": "{subject}"
+                }
+            },
+            "default_prompt": "default",
+            "custom_prompt_template": {
+                "name": "Custom",
+                "description": "Enter your own prompt"
+            }
+        }
+    
+    try:
+        with open(prompts_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"  {ERR} Error loading prompts.json: {e}")
+        print(f"  {INFO} Using minimal defaults")
+        return load_prompts()  # Returns the default structure
+
+
+def build_full_prompt(subject: str, prompt_style: str, prompts_data: dict) -> str:
+    """
+    Build complete AI generation prompt from subject and style.
+    
+    Args:
+        subject: User's subject description (e.g., "jumping frog")
+        prompt_style: Key from prompts.json (e.g., "side_profile") or "custom"
+        prompts_data: Loaded prompts.json data
+    
+    Returns:
+        Complete formatted prompt string
+    """
+    base = prompts_data["base_template"]
+    
+    if prompt_style == "custom":
+        # Custom prompt: user subject + quality wrappers
+        return f"{base['prefix']} {subject}. {base['suffix']}"
+    
+    # Structured prompt: base + view description + subject + suffix
+    prompt_config = prompts_data["prompts"].get(prompt_style)
+    if not prompt_config:
+        # Fallback to custom if style not found
+        return f"{base['prefix']} {subject}. {base['suffix']}"
+    
+    view_desc = prompt_config["view_description"].format(subject=subject)
+    
+    full_prompt = f"{base['prefix']} {view_desc} {base['suffix']}"
+    
+    return full_prompt
 
 
 if __name__ == "__main__":

@@ -107,8 +107,7 @@ def save_16bit(depth_arr, out_path: Path):
         normalized = ((depth_arr - min_val) / (max_val - min_val) * 65535.0).astype(np.uint16)
     
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(normalized.astype(np.uint16)).save(out_path, format='PNG', bits=16)
-
+    Image.fromarray(normalized.astype(np.uint16)).save(out_path)
 
 def main():
     p = argparse.ArgumentParser(description="Run Marigold depth estimation on an image.")
