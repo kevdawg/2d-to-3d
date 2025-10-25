@@ -1552,11 +1552,12 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
     
     # Delete unwanted formats
     #run_dir = DIR_3D / project_name.name
-    print(f"{project_name}")
-    base_path = DIR_3D / f"{project_name}"
+    print(f"{stl_final_path}")
+    print(f"{image_path}")
+    #base_path = DIR_3D / f"{project_name}"
     for fmt, keep in output_formats.items():
         if not keep:
-            file_path = base_path.with_suffix(f'.{fmt}')
+            file_path = stl_final_path.with_suffix(f'.{fmt}')
             if file_path.exists():
                 file_path.unlink()
                 print(f"  🗑️ Removed unwanted format: {file_path.name}")
