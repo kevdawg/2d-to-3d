@@ -1289,17 +1289,10 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
     print(f"  Processing: {image_path.name}")
     print(f"  Quality: {quality_preset.replace('_', ' ').title()}")
     print(f"{'='*60}")
-
-    ai_config = cfg.get("ai_enhancement", {})
-    print(f"\n🔍 DEBUG: AI Enhancement Config:")
-    print(f"   enabled = {ai_config.get('enabled', False)}")
-    print(f"   method = {ai_config.get('upscale_method', 'NOT FOUND')}")
-    print(f"   factor = {ai_config.get('upscale_factor', 'NOT FOUND')}")
     
     # Create output directory with UNIQUE name
     project_name = safe_name_from_file(image_path)
     output_dir = DIR_3D / f"{project_name}_{quality_preset}"
-    working_image = image_path
     
     # Ensure unique folder (add _2, _3, etc. if exists)
     counter = 2
@@ -1309,11 +1302,33 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
     
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"  📁 Output folder: {output_dir.name}")
-
-    # Copy source to output
-    shutil.copy2(working_image, output_dir / "source.png")
-
-    # STEP 1: Background removal
+    
+    # STEP 1: Photo enhancement (if from photos/ folder)
+    working_image = image_path
+    
+    if auto_enhance:
+        print(f"\n📸 Auto-enhancing photo...")
+        enhanced_path = DIR_ENHANCED / f"{image_path.stem}_enhanced.png"
+        
+        # Check if already enhanced
+        if enhanced_path.exists():
+            print(f"   Using cached enhanced version")
+            working_image = enhanced_path
+        else:
+            # Enhance and cache
+            from photo_preprocess import preprocess_photo
+            preset = cfg.get("auto_enhance_preset", "minimal")
+            
+            preprocess_photo(
+                str(image_path),
+                str(enhanced_path),
+                preset=preset,
+                save_intermediate=False
+            )
+            working_image = enhanced_path
+            print(f"   {OK} Enhanced and cached")
+    
+    # STEP 2: Background removal
     if REMOVE_BACKGROUND:
         print(f"\n🎭 Removing background...")
         nobg_path = output_dir / f"{project_name}_nobg.png"
@@ -1321,7 +1336,7 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
         # Log rembg command
         rembg_cmd = [
             "rembg", "i",
-            str(image_path),
+            str(working_image),
             str(nobg_path)
         ]
         log_command_to_file(
@@ -1331,17 +1346,95 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
             "Remove background with rembg"
         )
         
-        working_image = remove_background_if_enabled(image_path, nobg_path)
+        working_image = remove_background_if_enabled(working_image, nobg_path)
     
-    # STEP 2: Change background to safe 'gray' background
-    prepared_image = working_image
+    # Copy source to output
+    shutil.copy2(working_image, output_dir / "source.png")
+    
+    # STEP 3: AI Enhancement (if enabled)
+    ai_config = cfg.get("ai_enhancement", {})
+    
+    if ai_config.get("enabled", False):
+        # Get the Marigold target resolution for this quality preset
+        marigold_opts = MARIGOLD_PRESETS[quality_preset]
+        target_res = marigold_opts.get("marigold_processing_res", 768)
+        
+        # Check current image size
+        img = Image.open(working_image)
+        current_max = max(img.width, img.height)
+        
+        # Calculate optimal upscale factor
+        ratio = target_res / current_max
+        
+        if ratio >= 8:
+            upscale_factor = 8
+        elif ratio >= 4:
+            upscale_factor = 4
+        elif ratio >= 2:
+            upscale_factor = 2
+        else:
+            upscale_factor = 1
+        
+        print(f"\n🤖 AI Enhancement...")
+        print(f"   Current: {current_max}px → Target: {target_res}px → Upscale: {upscale_factor}x")
+        
+        enhanced_path = output_dir / f"{project_name}_ai_enhanced.png"
+        
+        # Import the function
+        if str(SCRIPTS_DIR / "photo_preprocessing") not in sys.path:
+            sys.path.insert(0, str(SCRIPTS_DIR / "photo_preprocessing"))
+        
+        try:
+            from ai_enhance import ai_enhance_image
+            
+            # Log command
+            log_command_to_file(
+                output_dir,
+                "ai_enhance",
+                [
+                    "python", "scripts/photo_preprocessing/ai_enhance.py",
+                    "--input", str(working_image),
+                    "--output", str(enhanced_path),
+                    "--upscale", str(upscale_factor),
+                    "--method", ai_config.get('upscale_method', 'realesrgan'),
+                    "--max-size", str(ai_config.get('max_input_size', 2048)),
+                    "--clarity", str(ai_config.get('clarity_strength', 1.3)),
+                    "--detail", str(ai_config.get('detail_amount', 1.2)),
+                    "--sharpen", str(ai_config.get('sharpen_strength', 150))
+                ],
+                "AI upscale and enhance image"
+            )
+            
+            ai_enhance_image(
+                str(working_image),
+                str(enhanced_path),
+                upscale_factor=upscale_factor,
+                upscale_method=ai_config.get("upscale_method", "realesrgan"),
+                max_input_size=ai_config.get("max_input_size", 2048),
+                clarity_strength=ai_config.get("clarity_strength", 1.3),
+                detail_amount=ai_config.get("detail_amount", 1.2),
+                sharpen_strength=ai_config.get("sharpen_strength", 150),
+                auto_fallback=True
+            )
+            working_image = enhanced_path
+            print(f"   {OK} AI enhanced: {enhanced_path.name}")
+        except Exception as e:
+            print(f"   {WARN} AI enhancement failed: {e}")
+            print(f"   {WARN} Continuing with original image...")
+            import traceback
+            traceback.print_exc()
+    else:
+        print(f"\n🤖 AI Enhancement: DISABLED")
+    
+    # STEP 4: Prepare for Marigold (composite transparent images)
+    marigold_input = working_image
     
     if REMOVE_BACKGROUND:
-        img = Image.open(prepared_image)
+        img = Image.open(working_image)
         
         if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
             # Get background color from config
-            bg_color = cfg.get("marigold_background_color", "gray")
+            bg_color = cfg.get("marigold_background_color", "white")
             
             # Map color names to RGB values
             bg_colors = {
@@ -1377,15 +1470,6 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
             
             prepared_path = output_dir / f"{project_name}_prepared_for_marigold.png"
             background.save(prepared_path, 'PNG')
-
-            # DEBUG: Verify saved image
-            debug_img = Image.open(prepared_path)
-            print(f"  🔍 DEBUG saved image:")
-            print(f"     Mode: {debug_img.mode}")
-            print(f"     Size: {debug_img.size}")
-            print(f"     Format: {debug_img.format}")
-            pixel_sample = debug_img.getpixel((100, 100))
-            print(f"     Sample pixel at (100,100): {pixel_sample}")
             
             # Log the compositing step
             log_command_to_file(
@@ -1395,137 +1479,23 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
                 f"Applied {bg_color} background before Marigold"
             )
             
-            working_image = prepared_path
+            marigold_input = prepared_path
             print(f"  ✓ Prepared: {prepared_path.name}")
     
-    print(f"\n  ➡️ FINAL marigold_input = {working_image.name}")
-
-    # STEP 3: Photo enhancement (if from photos/ folder)
-    if auto_enhance:
-        print(f"\n📸 Auto-enhancing photo...")
-        enhanced_path = DIR_ENHANCED / f"{image_path.stem}_enhanced.png"
-        
-        # Check if already enhanced
-        if enhanced_path.exists():
-            print(f"   Using cached enhanced version")
-            working_image = enhanced_path
-        else:
-            # Enhance and cache
-            from photo_preprocess import preprocess_photo
-            preset = cfg.get("auto_enhance_preset", "minimal")
-            
-            preprocess_photo(
-                str(image_path),
-                str(enhanced_path),
-                preset=preset,
-                save_intermediate=False
-            )
-            working_image = enhanced_path
-            print(f"   {OK} Enhanced and cached")
-    
-    # STEP 4: AI Enhancement (if enabled)
-    ai_config = cfg.get("ai_enhancement", {})
-    
-    # DEBUG output (optional - remove after testing)
-    if ai_config:
-        print(f"\n🔍 DEBUG: AI Enhancement Config:")
-        print(f"   enabled = {ai_config.get('enabled', False)}")
-        print(f"   method = {ai_config.get('upscale_method', 'NOT FOUND')}")
-        print(f"   factor = {ai_config.get('upscale_factor', 'NOT FOUND')}")
-    
-        # Get the Marigold target resolution for this quality preset
-        marigold_opts = MARIGOLD_PRESETS[quality_preset]
-        target_res = marigold_opts.get("marigold_processing_res", 768)
-        
-        # Check current image size
-        img = Image.open(working_image)
-        current_max = max(img.width, img.height)
-        
-        # Determine if upscaling is needed and by how much
-        if current_max >= target_res:
-            print(f"\n🤖 AI Enhancement: SKIPPED (image already {current_max}px, target is {target_res}px)")
-        else:
-            # Calculate optimal upscale factor
-            ratio = target_res / current_max
-            
-            if ratio >= 8:
-                upscale_factor = 8
-            elif ratio >= 4:
-                upscale_factor = 4
-            elif ratio >= 2:
-                upscale_factor = 2
-            else:
-                upscale_factor = 2  # Minimum upscale
-            
-            print(f"\n🤖 AI Enhancement...")
-            print(f"   Current: {current_max}px → Target: {target_res}px → Upscale: {upscale_factor}x")
-            
-            enhanced_path = output_dir / f"{project_name}_ai_enhanced.png"
-            
-            # Import the function
-            if str(SCRIPTS_DIR / "photo_preprocessing") not in sys.path:
-                sys.path.insert(0, str(SCRIPTS_DIR / "photo_preprocessing"))
-            
-            try:
-                from ai_enhance import ai_enhance_image
-                
-                # Log command
-                log_command_to_file(
-                    output_dir,
-                    "ai_enhance",
-                    [
-                        "python", "scripts/photo_preprocessing/ai_enhance.py",
-                        "--input", str(working_image),
-                        "--output", str(enhanced_path),
-                        "--upscale", str(upscale_factor),
-                        "--method", ai_config.get('upscale_method', 'realesrgan'),
-                        "--max-size", str(ai_config.get('max_input_size', 2048)),
-                        "--clarity", str(ai_config.get('clarity_strength', 1.3)),
-                        "--detail", str(ai_config.get('detail_amount', 1.2)),
-                        "--sharpen", str(ai_config.get('sharpen_strength', 150))
-                    ],
-                    "AI upscale and enhance image"
-                )
-                
-                ai_enhance_image(
-                    str(working_image),
-                    str(enhanced_path),
-                    upscale_factor=upscale_factor,  # Use calculated value
-                    upscale_method=ai_config.get("upscale_method", "realesrgan"),
-                    max_input_size=ai_config.get("max_input_size", 2048),
-                    clarity_strength=ai_config.get("clarity_strength", 1.3),
-                    detail_amount=ai_config.get("detail_amount", 1.2),
-                    sharpen_strength=ai_config.get("sharpen_strength", 150),
-                    auto_fallback=True
-                )
-                working_image = enhanced_path
-                print(f"   {OK} AI enhanced: {enhanced_path.name}")
-            except Exception as e:
-                print(f"   {WARN} AI enhancement failed: {e}")
-                print(f"   {WARN} Continuing with original image...")
-                import traceback
-                traceback.print_exc()
-    else:
-        print(f"\n🤖 AI Enhancement: DISABLED (set ai_enhancement.enabled=true in config)") 
+    print(f"\n  ➡️ FINAL marigold_input = {marigold_input.name}")
 
     # STEP 5: Generate depth map
     depth_path = output_dir / f"{project_name}_depth_16bit.png"
     marigold_opts = MARIGOLD_PRESETS[quality_preset]
     
-    # DEBUG: Show what image is being sent to Marigold
-    print(f"\n🔍 DEBUG INFO:")
-    print(f"   Marigold input: {working_image.name}")
-    print(f"   Input mode: {Image.open(working_image).mode}")
-    print(f"   Input size: {Image.open(working_image).size}")
-    
     # Use regional processing if enabled, otherwise standard
     if cfg.get('region_processing', {}).get('enabled', False):
-        run_marigold_with_regions(working_image, depth_path, cfg)
+        run_marigold_with_regions(marigold_input, depth_path, cfg)
     else:
-        run_marigold_cli(working_image, depth_path, marigold_opts)
+        run_marigold_cli(marigold_input, depth_path, marigold_opts)
     
     # STEP 6: Mask depth map with alpha channel
-    if REMOVE_BACKGROUND and working_image.suffix.lower() == '.png':
+    if REMOVE_BACKGROUND and marigold_input.suffix.lower() == '.png':
         try:
             # Use the background-removed image for masking
             nobg_image = output_dir / f"{project_name}_nobg.png"
@@ -1549,7 +1519,7 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
         
         stl_trimmed_path = output_dir / f"{project_name}_trimmed.stl"
         
-        # Call trim script via subprocess (runs in depth-to-3d env where trimesh is)
+        # Call trim script via subprocess
         trim_script = SCRIPTS_DIR / "model_generation" / "trim_borders.py"
         
         if not trim_script.exists():
@@ -1590,7 +1560,7 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
         
         try:
             repair_mesh_via_subprocess(
-                stl_for_repair,  # CHANGED: Use trimmed mesh if available
+                stl_for_repair,
                 stl_final_path, 
                 repair_settings,
                 CONDA_EXE,
@@ -1598,29 +1568,24 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
             )
             print(f"  {OK} Mesh repaired: {stl_final_path.name}")
             
-            # Optionally keep raw version
             if cfg.get("mesh_repair_settings", {}).get("save_before_repair", True):
                 print(f"  {INFO} Raw mesh saved: {stl_raw_path.name}")
             
         except Exception as e:
             print(f"  {ERR} Mesh repair failed: {e}")
-            print(f"  {INFO} Using untrimmed mesh")
+            print(f"  {INFO} Using unrepaired mesh")
             stl_final_path = stl_raw_path
     else:
         print(f"\n{INFO} Mesh repair disabled for {quality_preset.replace('_', ' ')}")
-        stl_final_path = stl_for_repair  # CHANGED: Use trimmed if available
+        stl_final_path = stl_for_repair
 
+    # STEP 10: Delete unwanted formats
     output_formats = {
         'stl': EXTRUDE_DEFAULTS.get('output_stl', True),
         'glb': EXTRUDE_DEFAULTS.get('output_glb', False),
         'obj': EXTRUDE_DEFAULTS.get('output_obj', False)
     }
     
-    # Delete unwanted formats
-    #run_dir = DIR_3D / project_name.name
-    print(f"{stl_final_path}")
-    print(f"{image_path}")
-    #base_path = DIR_3D / f"{project_name}"
     for fmt, keep in output_formats.items():
         if not keep:
             file_path = stl_final_path.with_suffix(f'.{fmt}')

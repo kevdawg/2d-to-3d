@@ -11,7 +11,7 @@ from pathlib import Path
 def mask_depth_with_alpha(depth_path, alpha_source_path, output_path=None):
     """
     Apply alpha mask from source image to depth map.
-    Sets background pixels to 0 (far distance) in depth map.
+    Sets background pixels to 65535 (white = far distance) in depth map.
     
     Args:
         depth_path: Path to depth map (grayscale 16-bit PNG)
@@ -29,66 +29,45 @@ def mask_depth_with_alpha(depth_path, alpha_source_path, output_path=None):
     else:
         output_path = Path(output_path)
     
-    # Load depth map
+    # Load depth map - NumPy 2.x loads as int32, so force uint16
     depth_img = Image.open(depth_path)
-    depth_array = np.array(depth_img)
-    
-    # Store original dtype (should be uint16 for 16-bit depth)
-    original_dtype = depth_array.dtype
-    
-    print(f"  DEBUG: Depth map shape: {depth_array.shape}, dtype: {original_dtype}")
-    print(f"  DEBUG: Depth range: {depth_array.min()} - {depth_array.max()}")
+    depth_array = np.array(depth_img).astype(np.uint16)  # Force uint16
     
     # Load alpha mask from source
     source_img = Image.open(alpha_source_path)
     
     # Check if source has alpha channel
     if source_img.mode != 'RGBA':
-        print(f"  ℹ️ Source has no alpha channel, skipping mask")
+        print(f"  Note: Source has no alpha channel, skipping mask")
         return depth_path
     
     # Extract alpha channel
     alpha = np.array(source_img)[:, :, 3]
     
-    print(f"  DEBUG: Alpha shape: {alpha.shape}")
-    print(f"  DEBUG: Alpha range: {alpha.min()} - {alpha.max()}")
-    
     # Resize alpha to match depth map size if needed
     if alpha.shape[:2] != depth_array.shape[:2]:
-        print(f"  DEBUG: Resizing alpha from {alpha.shape} to {depth_array.shape}")
         alpha_img = Image.fromarray(alpha).resize(
             (depth_array.shape[1], depth_array.shape[0]),
             Image.Resampling.LANCZOS
         )
         alpha = np.array(alpha_img)
     
-    # Create mask: Use lower threshold to keep semi-transparent pixels
-    # Anything with even slight transparency (>10) is considered foreground
+    # Create mask (threshold at 10 to keep semi-transparent pixels)
     mask = alpha > 10
     
-    # Count pixels
-    fg_pixels = np.sum(mask)
-    bg_pixels = np.sum(~mask)
-    total_pixels = mask.size
-    bg_percent = (bg_pixels / total_pixels) * 100
-    
-    print(f"  DEBUG: Foreground pixels: {fg_pixels} ({100-bg_percent:.1f}%)")
-    print(f"  DEBUG: Background pixels: {bg_pixels} ({bg_percent:.1f}%)")
-    
-    # Apply mask ONLY to background - DO NOT TOUCH FOREGROUND
+    # Apply mask - set background to 65535 (white = far distance)
     masked_depth = depth_array.copy()
+    masked_depth[~mask] = 65535  # Changed from 0 to 65535
     
-    # Set background to 0 (far distance / black)
-    masked_depth[~mask] = 0
+    # Calculate stats
+    bg_pixels = np.sum(~mask)
+    bg_percent = (bg_pixels / mask.size) * 100
     
-    # Verify we didn't corrupt the foreground
-    print(f"  DEBUG: Masked depth range: {masked_depth.min()} - {masked_depth.max()}")
-    print(f"  DEBUG: Foreground depth range: {masked_depth[mask].min()} - {masked_depth[mask].max()}")
+    # Save as 16-bit (always, since depth maps are always 16-bit)
+    result_img = Image.fromarray(masked_depth.astype(np.uint16))
+    result_img.save(output_path, format='PNG', bits=16)
     
-    # Save masked depth map (preserve bit depth)
-    Image.fromarray(masked_depth.astype(np.uint16), mode='I;16').save(output_path)
-    
-    print(f"  ✓ Masked depth: {bg_percent:.1f}% background removed")
+    print(f"  Masked depth: {bg_percent:.1f}% background set to far distance")
     return output_path
 
 

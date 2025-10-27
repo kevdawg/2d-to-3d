@@ -36,7 +36,7 @@ allow_custom_prompts: true       # Allow users to enter full custom prompts
 # ----------------------------------------
 # Photo Enhancement (Auto-Applied)
 # ----------------------------------------
-auto_enhance_photos: true                 # Auto-enhance photos from photos/ folder
+auto_enhance_photos: false                 # Auto-enhance photos from photos/ folder
 auto_enhance_preset: "minimal"            # Options: "none", "minimal", "balanced", "heavy"
 
 # ----------------------------------------
