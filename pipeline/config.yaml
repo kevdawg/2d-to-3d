@@ -103,7 +103,7 @@ marigold_presets:
 # ----------------------------------------
 # Marigold Depth Generation
 # ----------------------------------------
-marigold_background_color: "white"  # Options: "gray", "white", "black", "light_gray", "dark_gray", or hex "#RRGGBB"
+marigold_background_color: "gray"  # Options: "gray", "white", "black", "light_gray", "dark_gray", or hex "#RRGGBB"
 # Gray (128,128,128) = neutral mid-depth
 # White (255,255,255) = far depth (background recedes)
 # Black (0,0,0) = near depth (background comes forward)

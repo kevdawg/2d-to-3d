@@ -582,7 +582,12 @@ class ROIDetector:
         
         # Detect subjects if not provided
         if faces is None:
-            if detection_mode == 'automatic':
+            if detection_mode == 'prompt':
+                # Get prompt from config
+                text_prompt = getattr(self, 'detection_prompt', 'animal face. cow head. goat face')
+                confidence = getattr(self, 'prompt_confidence', 0.25)
+                faces = self.detect_with_prompt(image_path, text_prompt, confidence)
+            elif detection_mode == 'automatic':
                 faces = self.detect_subjects_automatic(image_path)
             elif detection_mode == 'contour':
                 faces = self.detect_subjects_contour(image_path)

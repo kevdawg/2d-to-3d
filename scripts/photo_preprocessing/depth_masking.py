@@ -86,10 +86,7 @@ def mask_depth_with_alpha(depth_path, alpha_source_path, output_path=None):
     print(f"  DEBUG: Foreground depth range: {masked_depth[mask].min()} - {masked_depth[mask].max()}")
     
     # Save masked depth map (preserve bit depth)
-    if original_dtype == np.uint16:
-        Image.fromarray(masked_depth.astype(np.uint16), mode='I;16').save(output_path)
-    else:
-        Image.fromarray(masked_depth.astype(np.uint8)).save(output_path)
+    Image.fromarray(masked_depth.astype(np.uint16), mode='I;16').save(output_path)
     
     print(f"  ✓ Masked depth: {bg_percent:.1f}% background removed")
     return output_path

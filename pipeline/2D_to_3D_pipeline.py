@@ -121,15 +121,47 @@ else:
     INFO = "ℹ️"
 
 
-def run_cmd(cmd_list, show_timer=False, timer_message="Processing"):
+def run_cmd(cmd_list, show_timer=False, timer_message="Processing", cwd=None, clean_env=False):
     """
     Run a subprocess command with clean single-line progress bar display.
+    Accepts cwd and a clean_env flag.
     """
     import time
     
-    output_lines = []
-    
+    env_vars = None  # Inherit parent environment by default
+    if clean_env:
+        print("   (Executing with minimal 'PATH' environment to prevent conflicts)")
+        env_vars = {}
+        
+        # Copy only the essential variables from the host
+        essential_vars = [
+            # System variables
+            'PATH', 'SystemRoot', 'SYSTEMDRIVE', 'ComSpec', 'TEMP', 'TMP', 
+            'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 
+            
+            # Home variables
+            'USERPROFILE', 'HOME', 'HOMEDRIVE', 'HOMEPATH',
+            
+            # Conda variables (CRITICAL for conda.bat to function)
+            'CONDA_EXE', 'CONDA_ROOT', 'CONDA_SHLVL', 'CONDA_BAT',
+            'CONDA_DEFAULT_ENV', 'CONDA_PREFIX' 
+        ]
+
+        # Also copy ANY other CONDA_ variables from the parent
+        for var in os.environ:
+            if var.startswith('CONDA_') and var not in essential_vars:
+                env_vars[var] = os.environ[var]
+
+        for var in essential_vars:
+            if var in os.environ and var not in env_vars:
+                env_vars[var] = os.environ[var]
+        
+        # Ensure PATH exists, even if minimal
+        if 'PATH' not in env_vars:
+            env_vars['PATH'] = os.environ.get('PATH', '')
+            
     try:
+        output_lines = []
         proc = subprocess.Popen(
             cmd_list, 
             stdout=subprocess.PIPE, 
@@ -138,13 +170,15 @@ def run_cmd(cmd_list, show_timer=False, timer_message="Processing"):
             encoding='utf-8', 
             errors='replace', 
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-            bufsize=1  # Line buffered
+            bufsize=1,  # Line buffered
+            cwd=cwd,      # <-- SETS THE CURRENT WORKING DIRECTORY
+            env=env_vars  # <-- SETS THE CLEAN ENVIRONMENT
         )
         
         start_time = time.time()
         last_progress_line = None
         
-        # Process output line-by-line
+        # (Rest of the function is unchanged)
         for line in iter(proc.stdout.readline, ''):
             if not line:
                 break
@@ -152,20 +186,15 @@ def run_cmd(cmd_list, show_timer=False, timer_message="Processing"):
             line = line.rstrip('\n\r')
             output_lines.append(line)
             
-            # Check if this is a progress bar line (contains % or it/s)
             is_progress = '%|' in line or 'it/s' in line or 'it]' in line
             
             if is_progress:
-                # Progress bar - update on same line
-                # Clear previous line and write new one
-                sys.stdout.write('\r' + ' ' * 100 + '\r')  # Clear line
+                sys.stdout.write('\r' + ' ' * 100 + '\r')
                 sys.stdout.write('    ' + line)
                 sys.stdout.flush()
                 last_progress_line = line
             else:
-                # Regular output - print on new line
                 if last_progress_line:
-                    # If we just had progress bars, move to new line first
                     sys.stdout.write('\n')
                     last_progress_line = None
                 sys.stdout.write('    ' + line + '\n')
@@ -173,7 +202,6 @@ def run_cmd(cmd_list, show_timer=False, timer_message="Processing"):
         
         proc.wait()
         
-        # Clear any remaining progress bar
         if last_progress_line:
             sys.stdout.write('\r' + ' ' * 100 + '\r')
             sys.stdout.flush()
@@ -234,6 +262,56 @@ def log_command_to_file(output_dir: Path, command_name: str, cmd_list: list, des
 def conda_prefix_cmd(env_name, cmd_list):
     """Return a full command list that runs cmd_list inside conda env."""
     return [CONDA_EXE, "run", "-n", env_name, "--no-capture-output"] + cmd_list if USE_CONDA else cmd_list
+
+def conda_prefix_cmd_new(env_name, cmd_list):
+    """
+    Return a full command list that runs cmd_list inside a properly
+    activated conda environment.
+    """
+    if not USE_CONDA:
+        return cmd_list
+    
+    # Build the command string to be run (e.g., "python marigold_cli.py ...")
+    quoted_cmd_parts = []
+    for part in cmd_list:
+        part_str = str(part)
+        # Add quotes if it has a space and isn't already quoted
+        if ' ' in part_str and not (part_str.startswith('"') and part_str.endswith('"')):
+            quoted_cmd_parts.append(f'"{part_str}"')
+        else:
+            quoted_cmd_parts.append(part_str)
+    run_string = ' '.join(quoted_cmd_parts)
+    
+    if platform.system() == "Windows":
+        # On Windows, we use `cmd.exe /C` to chain commands.
+        conda_bat = str(CONDA_EXE).strip('\"\'')
+        
+        # --- THIS IS THE FIX ---
+        # Only add quotes to the path if it contains a space.
+        if ' ' in conda_bat:
+            conda_call = f'call "{conda_bat}"'
+        else:
+            conda_call = f'call {conda_bat}'
+        # --- END FIX ---
+            
+        # The full command: call the activate script, AND THEN (&&) run our command
+        full_command_string = f'{conda_call} activate {env_name} && {run_string}'
+        
+        # Popen expects a list: ["cmd.exe", "/C", "the entire command string"]
+        return ["cmd.exe", "/C", full_command_string]
+    
+    else:
+        # On Linux/macOS, we can use `bash -c`
+        conda_base = Path(CONDA_EXE).parent.parent
+        bash_init = conda_base / "etc" / "profile.d" / "conda.sh"
+        
+        # Add quotes for safety on Linux
+        conda_call = f'source "{bash_init}" && conda'
+        
+        full_command_string = f'{conda_call} activate {env_name} && {run_string}'
+        
+        # Popen expects a list: ["/bin/bash", "-c", "the entire command string"]
+        return ["/bin/bash", "-c", full_command_string]
 
 
 def get_next_folder_name(base_name: str, parent_dir: Path) -> str:
@@ -562,19 +640,28 @@ def generate_image_interactive(full_prompt: str, model: str):
     input("\nPress Enter to continue...")
 
 
-
-        
-
 def run_marigold_cli(image_path: Path, depth_out: Path, marigold_opts: dict):
     """Run marigold_cli.py to create a 16-bit depth PNG."""
     marigold_model_path = HERE / ".." / "models" / "marigold_model"
     if not marigold_model_path.exists():
         raise RuntimeError(f"Marigold model not found at {marigold_model_path}.")
 
-    cmd = ["python", str(MARIGOLD_CLI),
-           "--input", str(image_path),
-           "--output", str(depth_out),
-           "--checkpoint", str(marigold_model_path),
+    # --- THIS IS THE FIX ---
+    # Set the CWD where the script will run
+    script_cwd = MARIGOLD_CLI.parent 
+    
+    # Calculate all paths RELATIVE to that CWD.
+    # This avoids all spaces and quoting issues in cmd.exe.
+    rel_input_path = os.path.relpath(image_path, script_cwd)
+    rel_output_path = os.path.relpath(depth_out, script_cwd)
+    rel_checkpoint_path = os.path.relpath(marigold_model_path, script_cwd)
+    # --- END FIX ---
+
+    # Use the simple script name and the new relative paths
+    cmd = ["python", MARIGOLD_CLI.name,
+           "--input", rel_input_path,     # <-- CHANGED
+           "--output", rel_output_path,    # <-- CHANGED
+           "--checkpoint", rel_checkpoint_path, # <-- CHANGED
            "--steps", str(marigold_opts.get("marigold_steps")),
            "--ensemble", str(marigold_opts.get("marigold_ensemble")),
            "--processing_res", str(marigold_opts.get("marigold_processing_res"))]
@@ -599,15 +686,14 @@ def run_marigold_cli(image_path: Path, depth_out: Path, marigold_opts: dict):
             f"Generate depth map from {image_path.name}"
         )
     
-    # Show command
-    #print(f"\n💻 Marigold command:")
-    #print(f"   {' '.join(cmd)}")
-    #print()
-    
+    # Get the full conda-wrapped command
     full = conda_prefix_cmd(MARIGOLD_ENV, cmd)
     
     print(f"\nGenerating depth map from {image_path.name}...")
-    rc, output = run_cmd(full)
+    print(f"   (Executing in: {script_cwd})") # Debug message
+    
+    # Pass both cwd and clean_env
+    rc, output = run_cmd(full, cwd=script_cwd, clean_env=True)
     
     if rc != 0:
         last_lines = "\n".join(output.splitlines()[-5:])
@@ -795,137 +881,6 @@ def run_extrude_cli(depth_path: Path, stl_out: Path, extrude_params: dict):
         last_lines = "\n".join(output.splitlines()[-5:])
         raise RuntimeError(f"3D extrusion failed.\n\nLast output from script:\n{last_lines}")
     return stl_out
-    
-
-def process_single(image_path: Path, marigold_opts: dict, extrude_opts: dict, file_counter=None, quality_preset="high"):
-    """Process a single image end-to-end."""
-    try:
-        start_time = time.time()
-        
-        counter_str = f"[{file_counter}] " if file_counter else ""
-        print(f"\n{'='*60}\n{counter_str}Processing: {image_path.name}\n{'='*60}")
-        
-        # Create safe folder name with quality suffix
-        name = safe_name_from_file(image_path)
-        name_with_quality = f"{name}_{quality_preset}"
-        run_dir = DIR_3D / name_with_quality
-        run_dir.mkdir(parents=True, exist_ok=True)
-        
-        working_image = image_path
-        
-        ai_config = cfg.get("ai_enhancement", {})
-        if ai_config.get("enabled", False):
-            print(f"🤖 AI Enhancement...")
-            enhanced_path = run_dir / f"{name_with_quality}_ai_enhanced.png"
-            
-            # Import the function
-            sys.path.insert(0, str(SCRIPTS_DIR / "photo_preprocessing"))
-            from ai_enhance import ai_enhance_image
-            
-            try:
-                log_command_to_file(
-                    f"python scripts/photo_preprocessing/ai_enhance.py "
-                    f"--input \"{working_image}\" "
-                    f"--output \"{enhanced_path}\" "
-                    f"--upscale {ai_config.get('upscale_factor', 4)} "
-                    f"--method {ai_config.get('upscale_method', 'realesrgan')} "
-                    f"--max-size {ai_config.get('max_input_size', 2048)} "
-                    f"--clarity {ai_config.get('clarity_strength', 1.3)} "
-                    f"--detail {ai_config.get('detail_amount', 1.2)} "
-                    f"--sharpen {ai_config.get('sharpen_strength', 150)}"
-                )
-                
-                ai_enhance_image(
-                    str(working_image),
-                    str(enhanced_path),
-                    upscale_factor=ai_config.get("upscale_factor", 4),
-                    upscale_method=ai_config.get("upscale_method", "realesrgan"),
-                    max_input_size=ai_config.get("max_input_size", 2048),
-                    clarity_strength=ai_config.get("clarity_strength", 1.3),
-                    detail_amount=ai_config.get("detail_amount", 1.2),
-                    sharpen_strength=ai_config.get("sharpen_strength", 150),
-                    auto_fallback=True
-                )
-                working_image = enhanced_path
-                print(f"  ✓ AI enhanced: {enhanced_path.name}")
-            except Exception as e:
-                print(f"  ⚠️ AI enhancement failed: {e}")
-                print(f"  ⚠️ Continuing with original image...")
-                import traceback
-                traceback.print_exc()
-        else:
-            print(f"🤖 AI Enhancement: DISABLED")
-        
-        # Continue with existing background removal step...
-        if REMOVE_BACKGROUND:
-            print(f"🎭 Removing background...")
-        
-        # STEP 2: Remove background if enabled
-        if REMOVE_BACKGROUND:
-            print(f"\n{'='*60}\nSTEP 2: Background Removal\n{'='*60}")
-            nobg_path = run_dir / f"{name_with_quality}_nobg.png"
-            working_image = remove_background_if_enabled(working_image, nobg_path)
-            shutil.copy2(working_image, run_dir / f"{name_with_quality}_original.png")
-        else:
-            shutil.copy2(image_path, run_dir / image_path.name)
-        
-        # STEP 3: Run Marigold (depth only)
-        print(f"\n{'='*60}\nSTEP 3: Depth Map Generation\n{'='*60}")
-        depth_out = run_dir / f"{name_with_quality}_depth_16bit.png"
-        run_marigold_cli(working_image, depth_out, marigold_opts)
-
-        # STEP 4: Mask depth map with alpha channel
-        if REMOVE_BACKGROUND and working_image.suffix.lower() == '.png':
-            try:
-                mask_depth_with_alpha(depth_out, working_image)
-            except Exception as e:
-                print(f"  {WARN} Could not mask depth map: {e}")
-                print(f"  {WARN} Continuing with unmasked depth...")
-
-        # STEP 5: Run extrusion
-        print(f"\n{'='*60}\nSTEP 4: 3D Model Generation\n{'='*60}")
-        stl_out = run_dir / f"{name_with_quality}.stl"
-        run_extrude_cli(depth_out, stl_out, extrude_opts)
-        
-        # CALCULATE TOTAL TIME
-        elapsed = time.time() - start_time
-        mins, secs = divmod(int(elapsed), 60)
-        time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
-        
-        # Verify output files
-        print(f"\n{OK} Processing complete! Output folder: {run_dir.name}")
-        print(f"   Total processing time ({quality_preset} quality): {time_str}")
-        
-        output_files = [
-            (run_dir / f"{name_with_quality}_original.png" if REMOVE_BACKGROUND else run_dir / image_path.name, "Original"),
-            (depth_out, "Depth map"),
-            (stl_out, "STL"),
-            (run_dir / f"{name_with_quality}.glb", "GLB"),
-            (run_dir / f"{name_with_quality}.obj", "OBJ")
-        ]
-        
-        all_exist = True
-        for file_path, description in output_files:
-            if file_path.exists():
-                print(f"   {OK} {description}: {file_path.name}")
-            else:
-                print(f"   {ERR} {description}: MISSING!")
-                all_exist = False
-        
-        if all_exist:
-            # Delete the original file from 2D_files after successful processing
-            try:
-                image_path.unlink()
-                print(f"\n   {TRASH} Deleted original from 2D_files: {image_path.name}")
-            except Exception as e:
-                print(f"\n   {WARN} Could not delete original: {e}")
-        else:
-            print(f"\n   {WARN} Some files missing - keeping original in 2D_files")
-        
-    except Exception as e:
-        print(f"\n  [ERROR] Failed to process {image_path.name}: {e}")
-        import traceback
-        traceback.print_exc()
 
 
 def select_and_process(quality_preset):
@@ -1334,10 +1289,17 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
     print(f"  Processing: {image_path.name}")
     print(f"  Quality: {quality_preset.replace('_', ' ').title()}")
     print(f"{'='*60}")
+
+    ai_config = cfg.get("ai_enhancement", {})
+    print(f"\n🔍 DEBUG: AI Enhancement Config:")
+    print(f"   enabled = {ai_config.get('enabled', False)}")
+    print(f"   method = {ai_config.get('upscale_method', 'NOT FOUND')}")
+    print(f"   factor = {ai_config.get('upscale_factor', 'NOT FOUND')}")
     
     # Create output directory with UNIQUE name
     project_name = safe_name_from_file(image_path)
     output_dir = DIR_3D / f"{project_name}_{quality_preset}"
+    working_image = image_path
     
     # Ensure unique folder (add _2, _3, etc. if exists)
     counter = 2
@@ -1347,33 +1309,11 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
     
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"  📁 Output folder: {output_dir.name}")
-    
-    # STEP 1: Photo enhancement (if from photos/ folder)
-    working_image = image_path
-    
-    if auto_enhance:
-        print(f"\n📸 Auto-enhancing photo...")
-        enhanced_path = DIR_ENHANCED / f"{image_path.stem}_enhanced.png"
-        
-        # Check if already enhanced
-        if enhanced_path.exists():
-            print(f"   Using cached enhanced version")
-            working_image = enhanced_path
-        else:
-            # Enhance and cache
-            from photo_preprocess import preprocess_photo
-            preset = cfg.get("auto_enhance_preset", "minimal")
-            
-            preprocess_photo(
-                str(image_path),
-                str(enhanced_path),
-                preset=preset,
-                save_intermediate=False
-            )
-            working_image = enhanced_path
-            print(f"   {OK} Enhanced and cached")
-    
-    # STEP 2: Background removal
+
+    # Copy source to output
+    shutil.copy2(working_image, output_dir / "source.png")
+
+    # STEP 1: Background removal
     if REMOVE_BACKGROUND:
         print(f"\n🎭 Removing background...")
         nobg_path = output_dir / f"{project_name}_nobg.png"
@@ -1381,7 +1321,7 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
         # Log rembg command
         rembg_cmd = [
             "rembg", "i",
-            str(working_image),
+            str(image_path),
             str(nobg_path)
         ]
         log_command_to_file(
@@ -1391,16 +1331,13 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
             "Remove background with rembg"
         )
         
-        working_image = remove_background_if_enabled(working_image, nobg_path)
+        working_image = remove_background_if_enabled(image_path, nobg_path)
     
-    # Copy source to output
-    shutil.copy2(working_image, output_dir / "source.png")
-    
-    # STEP 3: Prepare for Marigold (composite transparent images)
-    marigold_input = working_image
+    # STEP 2: Change background to safe 'gray' background
+    prepared_image = working_image
     
     if REMOVE_BACKGROUND:
-        img = Image.open(working_image)
+        img = Image.open(prepared_image)
         
         if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
             # Get background color from config
@@ -1440,6 +1377,15 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
             
             prepared_path = output_dir / f"{project_name}_prepared_for_marigold.png"
             background.save(prepared_path, 'PNG')
+
+            # DEBUG: Verify saved image
+            debug_img = Image.open(prepared_path)
+            print(f"  🔍 DEBUG saved image:")
+            print(f"     Mode: {debug_img.mode}")
+            print(f"     Size: {debug_img.size}")
+            print(f"     Format: {debug_img.format}")
+            pixel_sample = debug_img.getpixel((100, 100))
+            print(f"     Sample pixel at (100,100): {pixel_sample}")
             
             # Log the compositing step
             log_command_to_file(
@@ -1449,33 +1395,153 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
                 f"Applied {bg_color} background before Marigold"
             )
             
-            marigold_input = prepared_path
+            working_image = prepared_path
             print(f"  ✓ Prepared: {prepared_path.name}")
     
-    print(f"\n  ➡️ FINAL marigold_input = {marigold_input.name}")
+    print(f"\n  ➡️ FINAL marigold_input = {working_image.name}")
 
-    # STEP 4: Generate depth map
+    # STEP 3: Photo enhancement (if from photos/ folder)
+    if auto_enhance:
+        print(f"\n📸 Auto-enhancing photo...")
+        enhanced_path = DIR_ENHANCED / f"{image_path.stem}_enhanced.png"
+        
+        # Check if already enhanced
+        if enhanced_path.exists():
+            print(f"   Using cached enhanced version")
+            working_image = enhanced_path
+        else:
+            # Enhance and cache
+            from photo_preprocess import preprocess_photo
+            preset = cfg.get("auto_enhance_preset", "minimal")
+            
+            preprocess_photo(
+                str(image_path),
+                str(enhanced_path),
+                preset=preset,
+                save_intermediate=False
+            )
+            working_image = enhanced_path
+            print(f"   {OK} Enhanced and cached")
+    
+    # STEP 4: AI Enhancement (if enabled)
+    ai_config = cfg.get("ai_enhancement", {})
+    
+    # DEBUG output (optional - remove after testing)
+    if ai_config:
+        print(f"\n🔍 DEBUG: AI Enhancement Config:")
+        print(f"   enabled = {ai_config.get('enabled', False)}")
+        print(f"   method = {ai_config.get('upscale_method', 'NOT FOUND')}")
+        print(f"   factor = {ai_config.get('upscale_factor', 'NOT FOUND')}")
+    
+        # Get the Marigold target resolution for this quality preset
+        marigold_opts = MARIGOLD_PRESETS[quality_preset]
+        target_res = marigold_opts.get("marigold_processing_res", 768)
+        
+        # Check current image size
+        img = Image.open(working_image)
+        current_max = max(img.width, img.height)
+        
+        # Determine if upscaling is needed and by how much
+        if current_max >= target_res:
+            print(f"\n🤖 AI Enhancement: SKIPPED (image already {current_max}px, target is {target_res}px)")
+        else:
+            # Calculate optimal upscale factor
+            ratio = target_res / current_max
+            
+            if ratio >= 8:
+                upscale_factor = 8
+            elif ratio >= 4:
+                upscale_factor = 4
+            elif ratio >= 2:
+                upscale_factor = 2
+            else:
+                upscale_factor = 2  # Minimum upscale
+            
+            print(f"\n🤖 AI Enhancement...")
+            print(f"   Current: {current_max}px → Target: {target_res}px → Upscale: {upscale_factor}x")
+            
+            enhanced_path = output_dir / f"{project_name}_ai_enhanced.png"
+            
+            # Import the function
+            if str(SCRIPTS_DIR / "photo_preprocessing") not in sys.path:
+                sys.path.insert(0, str(SCRIPTS_DIR / "photo_preprocessing"))
+            
+            try:
+                from ai_enhance import ai_enhance_image
+                
+                # Log command
+                log_command_to_file(
+                    output_dir,
+                    "ai_enhance",
+                    [
+                        "python", "scripts/photo_preprocessing/ai_enhance.py",
+                        "--input", str(working_image),
+                        "--output", str(enhanced_path),
+                        "--upscale", str(upscale_factor),
+                        "--method", ai_config.get('upscale_method', 'realesrgan'),
+                        "--max-size", str(ai_config.get('max_input_size', 2048)),
+                        "--clarity", str(ai_config.get('clarity_strength', 1.3)),
+                        "--detail", str(ai_config.get('detail_amount', 1.2)),
+                        "--sharpen", str(ai_config.get('sharpen_strength', 150))
+                    ],
+                    "AI upscale and enhance image"
+                )
+                
+                ai_enhance_image(
+                    str(working_image),
+                    str(enhanced_path),
+                    upscale_factor=upscale_factor,  # Use calculated value
+                    upscale_method=ai_config.get("upscale_method", "realesrgan"),
+                    max_input_size=ai_config.get("max_input_size", 2048),
+                    clarity_strength=ai_config.get("clarity_strength", 1.3),
+                    detail_amount=ai_config.get("detail_amount", 1.2),
+                    sharpen_strength=ai_config.get("sharpen_strength", 150),
+                    auto_fallback=True
+                )
+                working_image = enhanced_path
+                print(f"   {OK} AI enhanced: {enhanced_path.name}")
+            except Exception as e:
+                print(f"   {WARN} AI enhancement failed: {e}")
+                print(f"   {WARN} Continuing with original image...")
+                import traceback
+                traceback.print_exc()
+    else:
+        print(f"\n🤖 AI Enhancement: DISABLED (set ai_enhancement.enabled=true in config)") 
+
+    # STEP 5: Generate depth map
     depth_path = output_dir / f"{project_name}_depth_16bit.png"
     marigold_opts = MARIGOLD_PRESETS[quality_preset]
     
     # DEBUG: Show what image is being sent to Marigold
     print(f"\n🔍 DEBUG INFO:")
-    print(f"   Marigold input: {marigold_input.name}")
-    print(f"   Input mode: {Image.open(marigold_input).mode}")
-    print(f"   Input size: {Image.open(marigold_input).size}")
+    print(f"   Marigold input: {working_image.name}")
+    print(f"   Input mode: {Image.open(working_image).mode}")
+    print(f"   Input size: {Image.open(working_image).size}")
     
     # Use regional processing if enabled, otherwise standard
     if cfg.get('region_processing', {}).get('enabled', False):
-        run_marigold_with_regions(marigold_input, depth_path, cfg)
+        run_marigold_with_regions(working_image, depth_path, cfg)
     else:
-        run_marigold_cli(marigold_input, depth_path, marigold_opts)
+        run_marigold_cli(working_image, depth_path, marigold_opts)
     
+    # STEP 6: Mask depth map with alpha channel
+    if REMOVE_BACKGROUND and working_image.suffix.lower() == '.png':
+        try:
+            # Use the background-removed image for masking
+            nobg_image = output_dir / f"{project_name}_nobg.png"
+            if nobg_image.exists():
+                from depth_masking import mask_depth_with_alpha
+                mask_depth_with_alpha(depth_path, nobg_image)
+                print(f"   {OK} Depth map masked with alpha channel")
+        except Exception as e:
+            print(f"   {WARN} Could not mask depth map: {e}")
+            print(f"   {WARN} Continuing with unmasked depth...")
     
-    # STEP 6: Extrude to 3D model
+    # STEP 7: Extrude to 3D model
     stl_raw_path = output_dir / f"{project_name}_raw.stl"
     run_extrude_cli(depth_path, stl_raw_path, EXTRUDE_DEFAULTS)
     
-    # STEP 7: Trim borders (if enabled and needed)
+    # STEP 8: Trim borders (if enabled and needed)
     stl_for_repair = stl_raw_path
     
     if cfg.get("trim_borders_before_repair", False):
@@ -1512,7 +1578,7 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
     else:
         stl_for_repair = stl_raw_path
     
-    # STEP 8: Mesh repair (quality-dependent)
+    # STEP 9: Mesh repair (quality-dependent)
     from mesh_postprocess import should_repair_for_quality, repair_mesh_via_subprocess
     
     should_repair, repair_settings = should_repair_for_quality(quality_preset, cfg)
@@ -1580,8 +1646,6 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
     print(f"   Output: {output_dir.name}/")
     print(f"   Total time: {time_str}")
     print(f"{'='*60}")
-
-    input("\nPress Enter to continue...")
 
 
 def reprocess_depth_map(depth_path):
