@@ -22,10 +22,16 @@ Transform 2D images into high-quality 3D models optimized for bas-relief CNC car
 - **Conda** - [Download Miniconda](https://docs.conda.io/en/latest/miniconda.html) or [Anaconda](https://www.anaconda.com/download)
 - **Git** - [Download](https://git-scm.com/downloads)
 
-**System Requirements:**
-- **RAM:** 8GB minimum, 16GB+ recommended
-- **Storage:** 10GB free space (for models and processing)
-- **GPU:** Optional but highly recommended (NVIDIA with CUDA support)
+**System Requirements**
+- **RAM**: 8GB minimum, 16GB+ recommended
+- **Storage**: 20-30GB free space
+  - Models: ~5GB (Marigold ~2GB, SAM ~2.4GB, AI enhancement models ~1GB)
+  - Conda environments: ~8GB (Python + all dependencies)
+  - Working space: 5-10GB (for processing and outputs)
+  - User data: Variable (your images and 3D models)
+- **GPU**: Optional but highly recommended (NVIDIA with CUDA support)
+  - CPU-only: Expect 10-20x slower processing
+  - GPU (CUDA): Significant speedup for depth generation
 
 **Installation Verification:**
 ```bash
@@ -194,16 +200,18 @@ run_pipeline.bat
 
 ### Interactive Menu
 
-1. **Generate new image (basic quality)** - Use Gemini API (FREE)
-2. **Generate new image (high quality)** - Use Imagen 3 (requires billing)
-3. **Enhance photos** - Automatically enhance all photos in 2D_files/
-4. **Enhance single photo** - Preview and enhance one photo
-5. **Batch process all images** - Convert all 2D images to 3D models
-6. **Process single image (low quality)** - Fast processing
-7. **Process single image (medium quality)** - Balanced quality/speed
-8. **Process single image (high quality)** - Maximum detail
-9. **Edit default parameters** - Modify config.yaml settings
-10. **Quit**
+The pipeline provides a simplified main menu:
+
+**MAIN MENU:**
+1. **Generate AI Image** - Create images with Gemini (FREE) or Imagen 3 (paid)
+2. **Transform 2D to 3D** - Full pipeline from image to 3D model
+   - Low Quality (fast, ~2 min)
+   - Medium Quality (balanced, ~5 min)  
+   - High Quality (best, ~10+ min)
+   - Batch Process Folder
+3. **Rerun Depth-to-Model** - Reprocess existing depth maps with new settings
+4. **Edit Configuration** - Modify config.yaml settings
+5. **Quit**
 
 ### Regional Processing (Advanced)
 

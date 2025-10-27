@@ -577,7 +577,7 @@ def generate_with_prompt_style(prompt_style: str, prompts_data: dict):
     print("SELECT AI MODEL")
     print('─'*60)
     print("  1. Gemini (FREE, basic quality)")
-    print("  2. Imagen 3 ($0.04, high quality)")
+    print("  2. Imagen 3 ($0.01, high quality)")
     print("  3. Cancel")
     print('─'*60)
     
@@ -630,7 +630,7 @@ def generate_image_interactive(full_prompt: str, model: str):
         print(f"\n{OK} Image saved: {out_path.name}")
         print(f"   Generation time: {time_str}")
         if model == "imagen":
-            print(f"   Cost: ~$0.04")
+            print(f"   Cost: $0.01")
         
     except Exception as e:
         print(f"\n{ERR} Image generation failed: {e}")
@@ -1027,7 +1027,7 @@ def generate_ai_image_menu():
     print("GENERATE AI IMAGE")
     print('─'*60)
     print("  1. Gemini (FREE, basic quality)")
-    print("  2. Imagen ($0.04, high quality)")
+    print("  2. Imagen ($0.01, high quality)")
     print("  3. Back to main menu")
     print('─'*60)
     
@@ -1090,7 +1090,7 @@ def generate_with_aigen_interactive():
     """Interactive Imagen 3 image generation."""
     
     print(f"\n{'─'*60}")
-    print("GENERATE WITH AIGEN 3 ($0.04)")
+    print("GENERATE WITH AIGEN 3 ($0.01)")
     print('─'*60)
     
     prompt = input("\nEnter image description (or 'cancel'): ").strip()
@@ -1121,7 +1121,7 @@ def generate_with_aigen_interactive():
         
         print(f"\n{OK} Image saved: {out_path.name}")
         print(f"   Generation time: {time_str}")
-        print(f"   Cost: ~$0.04")
+        print(f"   Cost: $0.01")
         
     except Exception as e:
         print(f"\n{ERR} Image generation failed: {e}")

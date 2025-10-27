@@ -43,7 +43,7 @@ auto_enhance_preset: "minimal"            # Options: "none", "minimal", "balance
 # Background Removal
 # ----------------------------------------
 remove_background: true
-bg_removal_method: "rembg"  # "removebg" ($0.20/image) or "rembg" (free)
+bg_removal_method: "rembg"  # "removebg" ($0.01/image) or "rembg" (free)
 bg_removal_model: "isnet-general-use"
 bg_crop_enabled: true
 bg_crop_margin: 10
