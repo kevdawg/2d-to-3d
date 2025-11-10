@@ -9,20 +9,11 @@ import os
 import platform
 from pathlib import Path
 
-# Windows-safe symbols
-def is_windows_cmd():
-    if platform.system() != 'Windows':
-        return False
-    if 'WT_SESSION' in os.environ:
-        return False
-    return True
-
-if is_windows_cmd():
-    OK = "[OK]"
-    ERR = "[X]"
-else:
-    OK = "✅"
-    ERR = "❌"
+OK = "[OK]"
+ERR = "[X]"
+WARN = "[!]"
+TRASH = "[DEL]"
+INFO = "[i]"
 
 # Import the extrude function from extrude.py
 script_dir = Path(__file__).resolve().parent
@@ -74,8 +65,6 @@ def main():
                         help="Include vertex colors from RGB (default: true)")
     parser.add_argument("--scene_lights", type=lambda x: x.lower() == 'true', default=True,
                         help="Add directional lights to GLB (default: true)")
-    parser.add_argument("--prepare_for_3d_printing", type=lambda x: x.lower() == 'true', default=False,
-                        help="Rotate model for 3D printing orientation (default: false)")
     parser.add_argument("--zip_outputs", type=lambda x: x.lower() == 'true', default=False,
                         help="Compress output files into zip (default: false)")
     
@@ -177,7 +166,6 @@ def main():
             f_back=args.f_back,
             vertex_colors=args.vertex_colors,
             scene_lights=args.scene_lights,
-            prepare_for_3d_printing=args.prepare_for_3d_printing,
             zip_outputs=args.zip_outputs,
         )
         

@@ -11,6 +11,7 @@ Supports multiple upscaling methods:
 
 Dependencies are auto-installed if missing (requires internet connection).
 """
+
 import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter
 import sys
@@ -18,6 +19,14 @@ import subprocess
 import importlib
 from pathlib import Path
 import argparse
+import platform
+import os
+
+OK = "[OK]"
+ERR = "[X]"
+WARN = "[!]"
+TRASH = "[DEL]"
+INFO = "[i]"
 
 
 def install_package_in_current_env(package_name):
@@ -32,10 +41,10 @@ def install_package_in_current_env(package_name):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
-        print(f"  ✓ {package_name} installed successfully")
+        print(f"  {OK} {package_name} installed successfully")
         return True
     except subprocess.CalledProcessError as e:
-        print(f"  ✗ Failed to install {package_name}: {e}")
+        print(f"  {ERR} Failed to install {package_name}: {e}")
         return False
 
 
@@ -61,55 +70,109 @@ def lazy_import(module_name, package_name=None):
             try:
                 return importlib.import_module(module_name)
             except ImportError as e:
-                print(f"  ✗ Failed to import {module_name} after installation: {e}")
+                print(f"  {ERR} Failed to import {module_name} after installation: {e}")
                 return None
         return None
 
 
-def upscale_realesrgan(img, scale=4):
+def upscale_realesrgan(img, scale=4, model_cache_dir=None):
     """
-    Upscale using Real-ESRGAN (state-of-the-art AI upscaling).
-    Great general purpose - Best for photos, textures, and detailed images.
+    Upscale image using Real-ESRGAN AI model.
     
-    Performance: Moderate speed on GPU, slow on CPU (~2-4 min for 1024x1024 → 4096x4096)
-    Memory: ~4GB RAM for 1024x1024 input
+    Args:
+        img: PIL Image object
+        scale: Upscaling factor (2 or 4)
+        model_cache_dir: Directory to cache models
+    
+    Returns:
+        Upscaled PIL Image
     """
-    print(f"Upscaling {scale}x with Real-ESRGAN (AI model)...")
-    
-    # Lazy import Real-ESRGAN
-    realesrgan = lazy_import('realesrgan', 'realesrgan')
-    if realesrgan is None:
-        print("  ✗ Real-ESRGAN unavailable, falling back to LANCZOS")
-        return upscale_lanczos(img, scale)
-    
     try:
         from realesrgan import RealESRGANer
         from basicsr.archs.rrdbnet_arch import RRDBNet
+        import torch
+        import cv2
         
-        # Initialize model
-        model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=scale)
-        upsampler = RealESRGANer(
-            scale=scale,
-            model_path=None,  # Will download automatically
-            model=model,
-            tile=400,  # Process in tiles to save memory
-            tile_pad=10,
-            pre_pad=0,
-            half=False  # Use FP32 for CPU compatibility
+        print(f"Upscaling {scale}x with Real-ESRGAN (AI model)...")
+        
+        # Determine model based on scale
+        if scale == 4:
+            model_name = 'RealESRGAN_x4plus'
+            netscale = 4
+        else:  # scale == 2 or 1 (treat 1 as 2)
+            model_name = 'RealESRGAN_x2plus'
+            netscale = 2
+            if scale == 1:
+                scale = 2  # Real-ESRGAN minimum is 2x
+        
+        # Set model cache directory
+        if model_cache_dir is None:
+            model_cache_dir = Path(__file__).parent.parent.parent / "models" / "RealESRGAN"
+        
+        model_cache_dir = Path(model_cache_dir)
+        model_cache_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Model URLs
+        model_urls = {
+            'RealESRGAN_x2plus': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth',
+            'RealESRGAN_x4plus': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth'
+        }
+        
+        # Check if model exists locally
+        model_path = model_cache_dir / f"{model_name}.pth"
+        
+        if not model_path.exists():
+            print(f"  Downloading {model_name} model...")
+            import urllib.request
+            urllib.request.urlretrieve(model_urls[model_name], str(model_path))
+            print(f"  {OK} Model cached")
+        else:
+            print(f"  Using cached model: {model_path.name}")
+        
+        # Create model architecture
+        model = RRDBNet(
+            num_in_ch=3,
+            num_out_ch=3,
+            num_feat=64,
+            num_block=23,
+            num_grow_ch=32,
+            scale=netscale
         )
         
-        # Convert PIL to numpy array
-        img_np = np.array(img)
+        # Detect device
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Initialize upsampler
+        upsampler = RealESRGANer(
+            scale=netscale,
+            model_path=str(model_path),
+            model=model,
+            tile=0,
+            tile_pad=10,
+            pre_pad=0,
+            half=False,
+            device=device
+        )
+        
+        # Convert PIL to numpy array (BGR for OpenCV)
+        img_array = np.array(img)
+        img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
         
         # Upscale
-        output, _ = upsampler.enhance(img_np, outscale=scale)
+        output_bgr, _ = upsampler.enhance(img_bgr, outscale=scale)
         
-        # Convert back to PIL
-        return Image.fromarray(output)
+        # Convert back to RGB
+        output_rgb = cv2.cvtColor(output_bgr, cv2.COLOR_BGR2RGB)
+        
+        # Convert to PIL Image
+        output_img = Image.fromarray(output_rgb)
+        
+        print(f"  {OK} Upscaled to: {output_img.width}x{output_img.height}")
+        return output_img
         
     except Exception as e:
-        print(f"  ✗ Real-ESRGAN failed: {e}")
-        print("  Falling back to LANCZOS...")
+        print(f"  {ERR} Real-ESRGAN failed: {e}")
+        print(f"  Falling back to LANCZOS...")
         return upscale_lanczos(img, scale)
 
 
@@ -122,6 +185,11 @@ def upscale_lanczos(img, scale=4):
     Memory: Low (~2x input size)
     Quality: Good, but not as detailed as AI methods
     """
+
+    if scale == 1:
+        print(f"Upscaling 1x with Pillow (Lanczos)...")
+        return img  # No upscaling needed
+    
     print(f"Upscaling {scale}x with Pillow (Lanczos)...")
     new_size = (img.width * scale, img.height * scale)
     return img.resize(new_size, Image.Resampling.LANCZOS)
@@ -143,7 +211,7 @@ def upscale_waifu2x(img, scale=4):
     try:
         waifu2x = lazy_import('waifu2x_ncnn_vulkan_python', 'waifu2x-ncnn-vulkan')
         if waifu2x is None:
-            print("  ✗ Waifu2x unavailable, falling back to LANCZOS")
+            print("  {ERR} Waifu2x unavailable, falling back to LANCZOS")
             return upscale_lanczos(img, scale)
         
         from waifu2x_ncnn_vulkan_python import Waifu2x
@@ -160,7 +228,7 @@ def upscale_waifu2x(img, scale=4):
         return Image.fromarray(output)
         
     except Exception as e:
-        print(f"  ✗ Waifu2x failed: {e}")
+        print(f"  {ERR} Waifu2x failed: {e}")
         print("  Falling back to LANCZOS...")
         return upscale_lanczos(img, scale)
 
@@ -180,7 +248,7 @@ def upscale_gfpgan(img, scale=4):
     # Lazy import GFPGAN
     gfpgan = lazy_import('gfpgan', 'gfpgan')
     if gfpgan is None:
-        print("  ✗ GFPGAN unavailable, falling back to LANCZOS")
+        print(f"  {ERR} GFPGAN unavailable, falling back to LANCZOS")
         return upscale_lanczos(img, scale)
     
     try:
@@ -204,7 +272,7 @@ def upscale_gfpgan(img, scale=4):
         return Image.fromarray(output)
         
     except Exception as e:
-        print(f"  ✗ GFPGAN failed: {e}")
+        print(f"  {ERR} GFPGAN failed: {e}")
         print("  Falling back to LANCZOS...")
         return upscale_lanczos(img, scale)
 
@@ -222,7 +290,7 @@ def enhance_clarity(img, strength=1.3):
     # Lazy import opencv
     cv2 = lazy_import('cv2', 'opencv-python')
     if cv2 is None:
-        print("  ✗ OpenCV unavailable, skipping clarity enhancement")
+        print("  {ERR} OpenCV unavailable, skipping clarity enhancement")
         return img
     
     # Convert to numpy
@@ -264,7 +332,7 @@ def enhance_details(img, amount=1.2):
     # Lazy import opencv
     cv2 = lazy_import('cv2', 'opencv-python')
     if cv2 is None:
-        print("  ✗ OpenCV unavailable, skipping detail enhancement")
+        print(f"  {ERR} OpenCV unavailable, skipping detail enhancement")
         return img
     
     img_array = np.array(img).astype(np.float32)
@@ -306,14 +374,16 @@ def sharpen_image(img, radius=2, strength=150):
 def ai_enhance_image(
     input_path,
     output_path,
-    upscale_factor=4,
+    upscale_factor=1,
     upscale_method="realesrgan",
     max_input_size=2048,
     clarity_strength=1.3,
     detail_amount=1.2,
     sharpen_strength=150,
-    auto_fallback=True
+    auto_fallback=True, 
+    model_cache_dir=None
 ):
+
     """
     Complete AI enhancement pipeline.
     
@@ -343,24 +413,28 @@ def ai_enhance_image(
     # Check if image is too large
     max_dimension = max(img.width, img.height)
     if max_dimension > max_input_size and auto_fallback:
-        print(f"\n⚠️  WARNING: Image dimension ({max_dimension}px) exceeds maximum ({max_input_size}px)")
-        print(f"⚠️  Large images may cause out-of-memory errors with AI upscaling.")
-        print(f"⚠️  Automatically switching to LANCZOS (fast, memory-safe method).")
-        print(f"⚠️  To upscale large images with AI: increase 'max_input_size' in config\n")
+        print(f"\n{WARN}  WARNING: Image dimension ({max_dimension}px) exceeds maximum ({max_input_size}px)")
+        print(f"{WARN}  Large images may cause out-of-memory errors with AI upscaling.")
+        print(f"{WARN}  Automatically switching to LANCZOS (fast, memory-safe method).")
+        print(f"{WARN}  To upscale large images with AI: increase 'max_input_size' in config\n")
         upscale_method = "lanczos"
     
-    # Step 1: Upscale
+   # Step 1: Upscale
     print(f"[1/4] Upscaling {upscale_factor}x...")
-    
-    upscale_functions = {
-        "realesrgan": upscale_realesrgan,
-        "lanczos": upscale_lanczos,
-        "waifu2x": upscale_waifu2x,
-        "gfpgan": upscale_gfpgan
-    }
-    
-    upscale_func = upscale_functions.get(upscale_method.lower(), upscale_realesrgan)
-    img = upscale_func(img, upscale_factor)
+
+    # Call upscale function with model cache dir if Real-ESRGAN
+    if upscale_method.lower() == "realesrgan":
+        img = upscale_realesrgan(img, upscale_factor, model_cache_dir)
+    elif upscale_method.lower() == "lanczos":
+        img = upscale_lanczos(img, upscale_factor)
+    elif upscale_method.lower() == "waifu2x":
+        img = upscale_waifu2x(img, upscale_factor)
+    elif upscale_method.lower() == "gfpgan":
+        img = upscale_gfpgan(img, upscale_factor)
+    else:
+        # Default to Real-ESRGAN
+        img = upscale_realesrgan(img, upscale_factor, model_cache_dir)
+
     print(f"  Upscaled to: {img.width}x{img.height}")
     
     # Step 2: Clarity Enhancement
@@ -380,7 +454,7 @@ def ai_enhance_image(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     img.save(output_path, 'PNG', quality=100)
     
-    print(f"\n✅ Enhancement complete!")
+    print(f"\n{OK} Enhancement complete!")
     print(f"   Original: {original_size[0]}x{original_size[1]}")
     print(f"   Enhanced: {img.width}x{img.height}")
     print(f"   Saved to: {output_path}\n")
@@ -413,7 +487,7 @@ Examples:
     
     parser.add_argument("--input", required=True, help="Input image path")
     parser.add_argument("--output", required=True, help="Output image path")
-    parser.add_argument("--upscale", type=int, default=4, choices=[2, 4, 8],
+    parser.add_argument("--upscale", type=int, default=4, choices=[1, 2, 4, 8],
                        help="Upscale factor (default: 4)")
     parser.add_argument("--method", default="realesrgan",
                        choices=["realesrgan", "lanczos", "waifu2x", "gfpgan"],
@@ -444,7 +518,7 @@ Examples:
             auto_fallback=not args.no_fallback
         )
     except Exception as e:
-        print(f"\n❌ Error: {e}")
+        print(f"\n{ERR} Error: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

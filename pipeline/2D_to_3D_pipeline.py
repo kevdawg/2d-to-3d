@@ -1,31 +1,29 @@
 #!/usr/bin/env python3
 """
-Interactive launcher for Marigold -> Extrude pipeline (conda-run based).
-- Double-click run_pipeline.bat to start.
-- Uses conda run to execute marigold_cli.py and extrude.py in their respective conda envs.
-- Uses Gemini for FREE image generation.
+Interactive launcher for 2D to 3D Pipeline with timing tracking.
+- Uses conda run to execute scripts in their respective conda environments
+- Includes CLI argument support for automated testing
+- Comprehensive timing and performance profiling
 """
 
-
+import argparse
+from timing_tracker import TimingTracker
 import os
 import sys
 from pathlib import Path
 import time
 import shutil
 import subprocess
-import traceback
-import threading
-from pathlib import Path
+import argparse
 import yaml
 import platform
-from rembg import remove
 from PIL import Image
-import trimesh
-import json
-import numpy as np
 
-# Add scripts directory to Python path
+# Add timing tracker
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from timing_tracker import TimingTracker
+
 CONFIG_PATH = HERE / "config.yaml"
 SCRIPTS_DIR = HERE.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR / "depth_generation"))
@@ -33,18 +31,12 @@ sys.path.insert(0, str(SCRIPTS_DIR / "image_generation"))
 sys.path.insert(0, str(SCRIPTS_DIR / "model_generation"))
 sys.path.insert(0, str(SCRIPTS_DIR / "photo_preprocessing"))
 
-# Regional processing imports
-from roi_detector import ROIDetector
-from region_processor import RegionProcessor
-from depth_blender import DepthBlender
-
 # Import background removal functions
 from background_remover_removebg import remove_background
 from depth_masking import mask_depth_with_alpha
 
-
 if not CONFIG_PATH.exists():
-    print("Missing config.yaml in pipeline folder. Create it from the example.")
+    print("❌ Missing config.yaml in pipeline folder. Create it from the example.")
     sys.exit(1)
 
 with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -53,73 +45,63 @@ with open(CONFIG_PATH, "r", encoding="utf-8") as f:
 # Config values with defaults
 CONDA_EXE = cfg.get("conda_exe", "conda")
 
-# --- FIX: Auto-detect full conda path to improve compatibility ---
+# Auto-detect full conda path
 if CONDA_EXE == "conda":
     conda_path = shutil.which("conda")
     if conda_path:
         print(f"Auto-detected conda executable at: {conda_path}")
         CONDA_EXE = conda_path
-    else:
-        print("\nWARNING: Could not find 'conda' in the system PATH.")
-        print("         Please specify the full path to 'conda.exe' or 'conda.bat' in config.yaml if you encounter errors.")
 
-# Environment names
-AIGEN_ENV = cfg.get("aigen_env", "aigen")
+# Get model paths from config
+models_config = cfg.get("models", {})
+MARIGOLD_MODEL_PATH = (HERE / ".." / models_config.get("marigold", "models/marigold_model")).resolve()
+REALESRGAN_MODELS_DIR = (HERE / ".." / models_config.get("realesrgan", "models/RealESRGAN")).resolve()
+REMBG_MODELS_DIR = (HERE / ".." / models_config.get("rembg", "models/rembg_models")).resolve()
+
+# Ensure directories exist
+for model_dir in [MARIGOLD_MODEL_PATH.parent, REALESRGAN_MODELS_DIR, REMBG_MODELS_DIR]:
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+# ONLY Rembg requires environment variable (library limitation)
+os.environ['U2NET_HOME'] = str(REMBG_MODELS_DIR)
+
+
 MARIGOLD_ENV = cfg.get("marigold_env", "marigold")
 DEPTH_ENV = cfg.get("depth_env", "depth-to-3d")
+IMAGEN_ENV = cfg.get("imagen_env", "aigen")
 PHOTO_PREP_ENV = cfg.get("photo_prep_env", "photo-prep")
-USE_CONDA = bool(cfg.get("use_conda", True))
-
-# Script paths (relative to HERE which is pipeline/)
-MARIGOLD_CLI = (HERE / cfg.get("marigold_cli", "../scripts/depth_generation/marigold_cli.py")).resolve()
-EXTRUDE_CLI = (HERE / cfg.get("extrude_cli", "../scripts/model_generation/extrude_cli.py")).resolve()
-
-# Directory paths - FIXED (relative to HERE which is pipeline/)
-DIR_AI_GENERATED = (HERE / cfg.get("dir_ai_generated", "../data/AI_files")).resolve()
+DIR_AI = (HERE / cfg.get("dir_ai", "../data/AI_files")).resolve()
 DIR_PHOTOS = (HERE / cfg.get("dir_photos", "../data/Photos")).resolve()
 DIR_3D = (HERE / cfg.get("dir_3d", "../data/3D_files")).resolve()
-DIR_ENHANCED = (HERE / cfg.get("dir_enhanced", "../data/Photos_enhanced")).resolve()
+DIR_PHOTOS_ENHANCED = (HERE / cfg.get("dir_photos_enhanced", "../data/Photos_enhanced")).resolve()
+USE_CONDA = bool(cfg.get("use_conda", True))
 
 # Background removal settings
 REMOVE_BACKGROUND = bool(cfg.get("remove_background", True))
-BG_REMOVAL_METHOD = cfg.get("bg_removal_method", "rembg")
+BG_REMOVAL_METHOD = cfg.get("bg_removal_method", "removebg")
 BG_REMOVAL_MODEL = cfg.get("bg_removal_model", "isnet-general-use")
 BG_CROP_ENABLED = bool(cfg.get("bg_crop_enabled", True))
 BG_CROP_MARGIN = int(cfg.get("bg_crop_margin", 10))
 REMOVEBG_API_KEY = os.environ.get('REMOVEBG_API_KEY')
 
+# CLI scripts
+MARIGOLD_CLI = (HERE / cfg.get("marigold_cli", "../scripts/depth_generation/marigold_cli.py")).resolve()
+EXTRUDE_CLI = (HERE / cfg.get("extrude_cli", "../scripts/model_generation/extrude_cli.py")).resolve()
+
 # Load presets and defaults from config
 MARIGOLD_PRESETS = cfg.get("marigold_presets", {})
 EXTRUDE_DEFAULTS = cfg.get("extrude_defaults", {})
 
-# Ensure folders exist - FIXED (no relative_to() call)
+# Ensure folders exist
 print("Initializing directories...")
-for d in (DIR_AI_GENERATED, DIR_PHOTOS, DIR_3D, DIR_ENHANCED):
+for d, name in [(DIR_AI, "AI_files/"), (DIR_PHOTOS, "Photos/"), (DIR_3D, "3D_files/"), (DIR_PHOTOS_ENHANCED, "Photos_enhanced/")]:
     d.mkdir(parents=True, exist_ok=True)
-    # Simple display without relative_to() to avoid path errors
-    print(f"  ✓ {d.name}/ -> {d}")
 
-# Windows-safe symbols
-def is_windows_cmd():
-    if platform.system() != 'Windows':
-        return False
-    if 'WT_SESSION' in os.environ:
-        return False
-    return True
-
-if is_windows_cmd():
-    OK = "[OK]"
-    ERR = "[X]"
-    WARN = "[!]"
-    TRASH = "[DEL]"
-    INFO = "[i]"
-else:
-    OK = "✅"
-    ERR = "❌"
-    WARN = "⚠️"
-    TRASH = "🗑️"
-    INFO = "ℹ️"
-
+OK = "[OK]"
+ERR = "[X]"
+WARN = "[!]"
+TRASH = "[DEL]"
+INFO = "[i]"
 
 def run_cmd(cmd_list, show_timer=False, timer_message="Processing", cwd=None, clean_env=False):
     """
@@ -128,7 +110,7 @@ def run_cmd(cmd_list, show_timer=False, timer_message="Processing", cwd=None, cl
     """
     import time
     
-    env_vars = None  # Inherit parent environment by default
+    env_vars = None  # Default
     if clean_env:
         print("   (Executing with minimal 'PATH' environment to prevent conflicts)")
         env_vars = {}
@@ -159,6 +141,15 @@ def run_cmd(cmd_list, show_timer=False, timer_message="Processing", cwd=None, cl
         # Ensure PATH exists, even if minimal
         if 'PATH' not in env_vars:
             env_vars['PATH'] = os.environ.get('PATH', '')
+    
+    else:
+        # Not a clean_env, so just copy the parent environment
+        env_vars = os.environ.copy()
+
+    # Force the subprocess (conda) to use UTF-8 for its stdout/stderr
+    # This prevents the 'charmap' codec error when it prints
+    # Unicode characters (like progress bars) to the console.
+    env_vars['PYTHONIOENCODING'] = 'utf-8'
             
     try:
         output_lines = []
@@ -226,6 +217,173 @@ def run_cmd(cmd_list, show_timer=False, timer_message="Processing", cwd=None, cl
         print(f"  {ERR} {err_msg}")
         raise RuntimeError(err_msg)
 
+
+def parse_cli_args():
+    """Parse command-line arguments for automated testing."""
+    parser = argparse.ArgumentParser(
+        description='2D to 3D Pipeline - Automated testing support',
+        add_help=True
+    )
+    
+    # Test mode
+    parser.add_argument('--test-mode', action='store_true',
+                        help='Run in automated test mode (skip interactive menu)')
+    parser.add_argument('--input', type=str,
+                        help='Input image path (required for test mode)')
+    parser.add_argument('--quality', type=str, choices=['low', 'medium', 'high'],
+                        help='Quality preset (low/medium/high)')
+    
+    # Marigold overrides
+    parser.add_argument('--steps', type=int,
+                        help='Override marigold_steps')
+    parser.add_argument('--ensemble', type=int,
+                        help='Override marigold_ensemble')
+    parser.add_argument('--resolution', type=int,
+                        help='Override marigold_processing_res')
+    
+    # Extrusion overrides
+    parser.add_argument('--emboss', type=float,
+                        help='Override emboss depth (0.1-0.8)')
+    parser.add_argument('--smoothing', type=int,
+                        help='Override smoothing (odd number: 1,3,5,7,9)')
+    parser.add_argument('--near', type=float,
+                        help='Override near_offset (0.0-1.0)')
+    parser.add_argument('--far', type=float,
+                        help='Override far_offset (0.0-1.0)')
+    parser.add_argument('--width', type=float,
+                        help='Override width_mm')
+    
+    # Processing options
+    parser.add_argument('--no-bg-removal', action='store_true',
+                        help='Skip background removal')
+    parser.add_argument('--no-enhancement', action='store_true',
+                        help='Skip AI enhancement')
+    
+    return parser.parse_args()
+
+
+def apply_cli_overrides(preset_dict, extrude_dict, args):
+    """
+    Apply CLI argument overrides to config dictionaries.
+    
+    Args:
+        preset_dict: Marigold preset dictionary (will be modified)
+        extrude_dict: Extrusion settings dictionary (will be modified)
+        args: Parsed CLI arguments
+    
+    Returns:
+        Tuple of (modified_preset, modified_extrude)
+    """
+    # Deep copy to avoid modifying original
+    preset = preset_dict.copy()
+    extrude = extrude_dict.copy()
+    
+    # Marigold overrides
+    if args.steps is not None:
+        preset['marigold_steps'] = args.steps
+    if args.ensemble is not None:
+        preset['marigold_ensemble'] = args.ensemble
+    if args.resolution is not None:
+        preset['marigold_processing_res'] = args.resolution
+    
+    # Extrusion overrides
+    if args.emboss is not None:
+        extrude['emboss'] = args.emboss
+    if args.smoothing is not None:
+        extrude['smoothing'] = args.smoothing
+    if args.near is not None:
+        extrude['near_offset'] = args.near
+    if args.far is not None:
+        extrude['far_offset'] = args.far
+    if args.width is not None:
+        extrude['width_mm'] = args.width
+    
+    return preset, extrude
+
+
+def parse_cli_args():
+    """Parse command-line arguments for automated testing."""
+    parser = argparse.ArgumentParser(
+        description='2D to 3D Pipeline - Automated testing support',
+        add_help=True
+    )
+    
+    # Test mode
+    parser.add_argument('--test-mode', action='store_true',
+                        help='Run in automated test mode (skip interactive menu)')
+    parser.add_argument('--input', type=str,
+                        help='Input image path (required for test mode)')
+    parser.add_argument('--quality', type=str, choices=['low', 'medium', 'high'],
+                        help='Quality preset (low/medium/high)')
+    
+    # Marigold overrides
+    parser.add_argument('--steps', type=int,
+                        help='Override marigold_steps')
+    parser.add_argument('--ensemble', type=int,
+                        help='Override marigold_ensemble')
+    parser.add_argument('--resolution', type=int,
+                        help='Override marigold_processing_res')
+    
+    # Extrusion overrides
+    parser.add_argument('--emboss', type=float,
+                        help='Override emboss depth (0.1-0.8)')
+    parser.add_argument('--smoothing', type=int,
+                        help='Override smoothing (odd number: 1,3,5,7,9)')
+    parser.add_argument('--near', type=float,
+                        help='Override near_offset (0.0-1.0)')
+    parser.add_argument('--far', type=float,
+                        help='Override far_offset (0.0-1.0)')
+    parser.add_argument('--width', type=float,
+                        help='Override width_mm')
+    
+    # Processing options
+    parser.add_argument('--no-bg-removal', action='store_true',
+                        help='Skip background removal')
+    parser.add_argument('--no-enhancement', action='store_true',
+                        help='Skip AI enhancement')
+    
+    return parser.parse_args()
+
+
+def apply_cli_overrides(preset_dict, extrude_dict, args):
+    """
+    Apply CLI argument overrides to config dictionaries.
+    
+    Args:
+        preset_dict: Marigold preset dictionary (will be modified)
+        extrude_dict: Extrusion settings dictionary (will be modified)
+        args: Parsed CLI arguments
+    
+    Returns:
+        Tuple of (modified_preset, modified_extrude)
+    """
+    # Deep copy to avoid modifying original
+    preset = preset_dict.copy()
+    extrude = extrude_dict.copy()
+    
+    # Marigold overrides
+    if args.steps is not None:
+        preset['marigold_steps'] = args.steps
+    if args.ensemble is not None:
+        preset['marigold_ensemble'] = args.ensemble
+    if args.resolution is not None:
+        preset['marigold_processing_res'] = args.resolution
+    
+    # Extrusion overrides
+    if args.emboss is not None:
+        extrude['emboss'] = args.emboss
+    if args.smoothing is not None:
+        extrude['smoothing'] = args.smoothing
+    if args.near is not None:
+        extrude['near_offset'] = args.near
+    if args.far is not None:
+        extrude['far_offset'] = args.far
+    if args.width is not None:
+        extrude['width_mm'] = args.width
+    
+    return preset, extrude
+
+
 def log_command_to_file(output_dir: Path, command_name: str, cmd_list: list, description: str = ""):
     """
     Log a command to the project's command history file.
@@ -257,11 +415,14 @@ def log_command_to_file(output_dir: Path, command_name: str, cmd_list: list, des
         f.write(f"# {command_name.upper()}\n")
         f.write(f"{cmd_string}\n")
     
-    print(f"  📝 Command logged to: {log_file.name}")
+    print(f"  {INFO} Command logged to: {log_file.name}")
 
 def conda_prefix_cmd(env_name, cmd_list):
     """Return a full command list that runs cmd_list inside conda env."""
-    return [CONDA_EXE, "run", "-n", env_name, "--no-capture-output"] + cmd_list if USE_CONDA else cmd_list
+    #return [CONDA_EXE, "run", "-n", env_name, "--no-capture-output"] + cmd_list if USE_CONDA else cmd_list
+    return [CONDA_EXE, "run", "-n", env_name] + cmd_list if USE_CONDA else cmd_list
+
+
 
 def conda_prefix_cmd_new(env_name, cmd_list):
     """
@@ -314,6 +475,41 @@ def conda_prefix_cmd_new(env_name, cmd_list):
         return ["/bin/bash", "-c", full_command_string]
 
 
+def remove_background_if_enabled(image_path: Path, output_path: Path = None, padding: int = 0) -> Path:
+    """
+    Remove background from image if enabled in config.
+    Uses rembg library for background removal.
+    Returns path to processed image (either cleaned or original).
+    """
+    if not REMOVE_BACKGROUND:
+        return image_path
+    
+    if output_path is None:
+        output_path = image_path.parent / f"{image_path.stem}_nobg.png"
+    
+    try:
+        print(f"  Removing background from {image_path.name}...")
+        # Use the imported 'remove_background' function from the script
+        # (This assumes it's in the sys.path from the top of the file)
+        remove_background(
+            str(image_path), 
+            str(output_path), 
+            method=BG_REMOVAL_METHOD, 
+            crop=BG_CROP_ENABLED,
+            margin=BG_CROP_MARGIN,
+            model=BG_REMOVAL_MODEL,
+            padding=padding  # <-- PASS PADDING
+        )
+        
+        print(f"  {OK} Background removed (transparent)")
+        return output_path
+        
+    except Exception as e:
+        print(f"  {WARN} Background removal failed: {e}")
+        print(f"  {WARN} Continuing with original image...")
+        return image_path
+        
+
 def get_next_folder_name(base_name: str, parent_dir: Path) -> str:
     """
     Generate a unique folder name by appending a number if needed.
@@ -359,51 +555,6 @@ def safe_name_from_file(file_path: Path) -> str:
     # Use get_next_folder_name to ensure uniqueness
     return get_next_folder_name(base, DIR_3D)
 
-def remove_background_if_enabled(image_path: Path, output_path: Path = None) -> Path:
-    """
-    Remove background from image if enabled in config.
-    Uses rembg library for background removal.
-    Returns path to processed image (either cleaned or original).
-    """
-    if not REMOVE_BACKGROUND:
-        return image_path
-    
-    if output_path is None:
-        output_path = image_path.parent / f"{image_path.stem}_nobg.png"
-    
-    try:
-        print(f"  Removing background from {image_path.name}...")
-        with Image.open(image_path) as input_img:
-            # Remove background using rembg
-            output_img = remove(input_img)
-            
-            # Auto-crop transparent borders if enabled
-            if BG_CROP_ENABLED:
-                # Get bounding box of non-transparent pixels
-                bbox = output_img.getbbox()
-                if bbox:
-                    # Add margin
-                    width, height = output_img.size
-                    x1, y1, x2, y2 = bbox
-                    x1 = max(0, x1 - BG_CROP_MARGIN)
-                    y1 = max(0, y1 - BG_CROP_MARGIN)
-                    x2 = min(width, x2 + BG_CROP_MARGIN)
-                    y2 = min(height, y2 + BG_CROP_MARGIN)
-                    
-                    # Crop
-                    output_img = output_img.crop((x1, y1, x2, y2))
-                    print(f"    Cropped: {width}x{height} → {output_img.width}x{output_img.height}")
-            
-            output_img.save(output_path, 'PNG')
-        
-        print(f"  {OK} Background removed (transparent)")
-        return output_path
-        
-    except Exception as e:
-        print(f"  {WARN} Background removal failed: {e}")
-        print(f"  {WARN} Continuing with original image...")
-        return image_path
-
 
 def generate_via_gemini(user_desc: str, filename_out: Path):
     """Call generate_with_gemini.py helper via subprocess in NO environment (uses base Python)."""
@@ -413,7 +564,7 @@ def generate_via_gemini(user_desc: str, filename_out: Path):
 
     # Run in gemini conda environment
     cmd = ["python", str(gen_py), "--prompt", user_desc, "--out", str(filename_out)]
-    full_cmd = conda_prefix_cmd(AIGEN_ENV, cmd)
+    full_cmd = conda_prefix_cmd(IMAGEN_ENV, cmd)
     
     rc, output = run_cmd(full_cmd)
     if rc != 0:
@@ -564,7 +715,7 @@ def generate_with_prompt_style(prompt_style: str, prompts_data: dict):
     full_prompt = build_full_prompt(subject, prompt_style, prompts_data)
     
     # Show preview of what will be generated
-    print(f"\n📝 Generated prompt preview:")
+    print(f"\n{INFO} Generated prompt preview:")
     preview = full_prompt[:150] + "..." if len(full_prompt) > 150 else full_prompt
     print(f"   {preview}")
     
@@ -606,10 +757,10 @@ def generate_image_interactive(full_prompt: str, model: str):
     safe_name = "_".join([w for w in words if w.isalnum()])[:50]
     
     # Check if output file already exists
-    out_path = DIR_AI_GENERATED / f"{safe_name}.png"
+    out_path = DIR_AI / f"{safe_name}.png"
     counter = 2
     while out_path.exists():
-        out_path = DIR_AI_GENERATED / f"{safe_name}_{counter}.png"
+        out_path = DIR_AI / f"{safe_name}_{counter}.png"
         counter += 1
     
     try:
@@ -640,28 +791,18 @@ def generate_image_interactive(full_prompt: str, model: str):
     input("\nPress Enter to continue...")
 
 
-def run_marigold_cli(image_path: Path, depth_out: Path, marigold_opts: dict):
+def run_marigold_cli(image_path: Path, depth_out: Path, marigold_opts: dict, model_path: Path, tracker):
     """Run marigold_cli.py to create a 16-bit depth PNG."""
-    marigold_model_path = HERE / ".." / "models" / "marigold_model"
-    if not marigold_model_path.exists():
-        raise RuntimeError(f"Marigold model not found at {marigold_model_path}.")
-
-    # --- THIS IS THE FIX ---
-    # Set the CWD where the script will run
-    script_cwd = MARIGOLD_CLI.parent 
     
-    # Calculate all paths RELATIVE to that CWD.
-    # This avoids all spaces and quoting issues in cmd.exe.
-    rel_input_path = os.path.relpath(image_path, script_cwd)
-    rel_output_path = os.path.relpath(depth_out, script_cwd)
-    rel_checkpoint_path = os.path.relpath(marigold_model_path, script_cwd)
-    # --- END FIX ---
+    if not model_path.exists():
+        raise RuntimeError(f"Marigold model not found at {model_path}. Please run download_model.py first.")
 
-    # Use the simple script name and the new relative paths
-    cmd = ["python", MARIGOLD_CLI.name,
-           "--input", rel_input_path,     # <-- CHANGED
-           "--output", rel_output_path,    # <-- CHANGED
-           "--checkpoint", rel_checkpoint_path, # <-- CHANGED
+    tracker.substep("Initializing depth generation")
+    
+    cmd = ["python", str(MARIGOLD_CLI),
+           "--input", str(image_path),
+           "--output", str(depth_out),
+           "--checkpoint", str(model_path),  # Use passed path
            "--steps", str(marigold_opts.get("marigold_steps")),
            "--ensemble", str(marigold_opts.get("marigold_ensemble")),
            "--processing_res", str(marigold_opts.get("marigold_processing_res"))]
@@ -671,37 +812,21 @@ def run_marigold_cli(image_path: Path, depth_out: Path, marigold_opts: dict):
     else:
         cmd.append("--no-match_input_res")
     
-    if marigold_opts.get("marigold_save_checkpoints", False):
-        cmd.append("--save_checkpoints")
-    
-    if marigold_opts.get("marigold_resume", False):
-        cmd.append("--resume")
-
-    # Log command to project file
-    if depth_out.parent.exists():
-        log_command_to_file(
-            depth_out.parent,
-            "marigold",
-            cmd,
-            f"Generate depth map from {image_path.name}"
-        )
-    
-    # Get the full conda-wrapped command
     full = conda_prefix_cmd(MARIGOLD_ENV, cmd)
     
-    print(f"\nGenerating depth map from {image_path.name}...")
-    print(f"   (Executing in: {script_cwd})") # Debug message
+    tracker.substep(f"Running Marigold", 
+                    f"steps={marigold_opts.get('marigold_steps')} ensemble={marigold_opts.get('marigold_ensemble')} res={marigold_opts.get('marigold_processing_res')}")
     
-    # Pass both cwd and clean_env
-    rc, output = run_cmd(full, cwd=script_cwd, clean_env=True)
+    rc, output = run_cmd(full, tracker)
     
     if rc != 0:
         last_lines = "\n".join(output.splitlines()[-5:])
-        raise RuntimeError(f"Marigold depth generation failed.\n\nLast output from script:\n{last_lines}")
+        raise RuntimeError(f"Marigold depth generation failed.\n\nLast output:\n{last_lines}")
+    
     return depth_out
 
 
-def run_marigold_with_regions(image_path: Path, depth_out: Path, config: dict):
+def run_marigold_with_regions(image_path: Path, depth_out: Path, config: dict, tracker):
     """
     Run Marigold with region-specific processing for faces/subjects vs background.
     Includes automatic background removal before detection.
@@ -720,7 +845,7 @@ def run_marigold_with_regions(image_path: Path, depth_out: Path, config: dict):
     if not region_config.get('enabled', False):
         # Fall back to standard processing
         marigold_opts = config['marigold_presets']['high_quality']
-        return run_marigold_cli(image_path, depth_out, marigold_opts)
+        run_marigold_cli(marigold_input, depth_path, marigold_opts, MARIGOLD_MODEL_PATH, tracker)
     
     print(f"\n{'='*60}")
     print(f"  Regional Depth Processing")
@@ -842,9 +967,20 @@ def run_marigold_with_regions(image_path: Path, depth_out: Path, config: dict):
 
 def run_extrude_cli(depth_path: Path, stl_out: Path, extrude_params: dict):
     """Call extrude.py to produce STL from depth map."""
-    cmd = ["python", str(EXTRUDE_CLI),
-           "--input", str(depth_path),
-           "--output", str(stl_out),
+    
+    # --- THIS IS THE FIX ---
+    # Set the CWD where the script will run
+    script_cwd = EXTRUDE_CLI.parent 
+    
+    # Calculate all paths RELATIVE to that CWD.
+    rel_input_path = os.path.relpath(depth_path, script_cwd)
+    rel_output_path = os.path.relpath(stl_out, script_cwd)
+    # --- END FIX ---
+
+    # Use the simple script name and the new relative paths
+    cmd = ["python", EXTRUDE_CLI.name,  # <-- Use simple name
+           "--input", rel_input_path,     # <-- Use relative path
+           "--output", rel_output_path,    # <-- Use relative path
            "--width_mm", str(extrude_params.get("width_mm", 100.0)),
            "--smoothing", str(extrude_params.get("smoothing", 3)),
            "--near_offset", str(extrude_params.get("near_offset", 0.0)),
@@ -855,7 +991,6 @@ def run_extrude_cli(depth_path: Path, stl_out: Path, extrude_params: dict):
            "--f_back", str(extrude_params.get("f_back", 0.01)),
            "--vertex_colors", str(extrude_params.get("vertex_colors", True)),
            "--scene_lights", str(extrude_params.get("scene_lights", True)),
-           "--prepare_for_3d_printing", str(extrude_params.get("prepare_for_3d_printing", False)),
            "--zip_outputs", str(extrude_params.get("zip_outputs", False))]
 
     # Log command to project file
@@ -863,89 +998,23 @@ def run_extrude_cli(depth_path: Path, stl_out: Path, extrude_params: dict):
         log_command_to_file(
             stl_out.parent,
             "extrude",
-            cmd,
+            cmd, # Log the simple relative-path command
             f"Convert depth map to 3D model"
         )
-    
-    # Show command
-    #print(f"\n💻 Extrusion command:")
-    #print(f"   {' '.join(cmd)}")
-    #print()
 
+    # Get the full conda-wrapped command
     full = conda_prefix_cmd(DEPTH_ENV, cmd)
     
     print(f"\nConverting depth map to 3D model...")
-    rc, output = run_cmd(full)
+    print(f"   (Executing in: {script_cwd})") # Debug message
+    
+    # Pass both cwd and clean_env
+    rc, output = run_cmd(full, cwd=script_cwd, clean_env=True)
     
     if rc != 0:
         last_lines = "\n".join(output.splitlines()[-5:])
         raise RuntimeError(f"3D extrusion failed.\n\nLast output from script:\n{last_lines}")
     return stl_out
-
-
-def select_and_process(quality_preset):
-    """
-    Select source (AI or photo) and process with specified quality.
-    """
-    
-    print(f"\n{'─'*60}")
-    print(f"SELECT IMAGE SOURCE")
-    print('─'*60)
-    print("  1. From AI_files/ folder")
-    print("  2. From Photos/ folder (will auto-enhance)")
-    print("  3. Back")
-    print('─'*60)
-    
-    source_choice = input("\nSelect source [1-3]: ").strip()
-    
-    if source_choice == "1":
-        source_dir = DIR_AI_GENERATED
-        auto_enhance = False
-        print(f"\n📁 Scanning: {source_dir.relative_to(HERE.parent)}")
-    elif source_choice == "2":
-        source_dir = DIR_PHOTOS
-        auto_enhance = cfg.get("auto_enhance_photos", True)
-        print(f"\n📁 Scanning: {source_dir.relative_to(HERE.parent)}")
-    elif source_choice == "3":
-        return
-    else:
-        print(f"\n{ERR} Invalid option.")
-        return
-    
-    # List available images
-    files = list_image_files(source_dir)
-    
-    if not files:
-        print(f"\n{WARN} No images found in {source_dir.name}/")
-        print(f"       Path checked: {source_dir}")
-        if source_choice == "1":
-            print(f"       Generate AI images first (Main Menu → Option 1)")
-        else:
-            print(f"       Add photos to: {source_dir}")
-        input("\nPress Enter to continue...")
-        return
-    
-    print(f"\nAvailable images in {source_dir.name}/:")
-    for i, file_path in enumerate(files, 1):
-        print(f"  {i}. {file_path.name}")
-    
-    print(f"  {len(files) + 1}. Back")
-    
-    try:
-        choice = input(f"\nSelect image [1-{len(files) + 1}]: ").strip()
-        choice_num = int(choice)
-        
-        if choice_num == len(files) + 1:
-            return
-        
-        if 1 <= choice_num <= len(files):
-            image_path = files[choice_num - 1]
-            process_single_image(image_path, quality_preset, auto_enhance)
-        else:
-            print(f"\n{ERR} Invalid selection.")
-    
-    except ValueError:
-        print(f"\n{ERR} Invalid input.")
 
 
 def view_edit_defaults():
@@ -1060,10 +1129,10 @@ def generate_with_gemini_interactive():
     safe_prompt = safe_prompt.strip().replace(" ", "_")[:50]
     
     # Check if output file already exists
-    out_path = DIR_AI_GENERATED / f"{safe_prompt}.png"
+    out_path = DIR_AI / f"{safe_prompt}.png"
     counter = 2
     while out_path.exists():
-        out_path = DIR_AI_GENERATED / f"{safe_prompt}_{counter}.png"
+        out_path = DIR_AI / f"{safe_prompt}_{counter}.png"
         counter += 1
     
     try:
@@ -1102,10 +1171,10 @@ def generate_with_aigen_interactive():
     safe_prompt = safe_prompt.strip().replace(" ", "_")[:50]
     
     # Check if output file already exists
-    out_path = DIR_AI_GENERATED / f"{safe_prompt}.png"
+    out_path = DIR_AI / f"{safe_prompt}.png"
     counter = 2
     while out_path.exists():
-        out_path = DIR_AI_GENERATED / f"{safe_prompt}_{counter}.png"
+        out_path = DIR_AI / f"{safe_prompt}_{counter}.png"
         counter += 1
     
     try:
@@ -1130,26 +1199,35 @@ def generate_with_aigen_interactive():
 
 
 def transform_2d_to_3d_menu():
-    """Submenu for 2D to 3D transformation."""
+    """Transform 2D images to 3D models with quality selection."""
     
     print(f"\n{'─'*60}")
     print("TRANSFORM 2D TO 3D")
     print('─'*60)
-    print("  1. Low Quality (fast, ~2 min)")
-    print("  2. Medium Quality (balanced, ~5 min)")
-    print("  3. High Quality (best, ~10 min)")
-    print("  4. Batch Process Folder")
-    print("  5. Back to main menu")
+    print("  1. Ultra-Low Quality (preview, ~30 sec)")
+    print("  2. Low Quality (fast, ~2 min)")
+    print("  3. Medium Quality (balanced, ~5 min)")
+    print("  4. High Quality (best, ~10 min)")
+    print("  5. Ultra-High Quality (maximum, ~30 min)")
+    print("  6. Batch Process Folder")
+    print("  7. Back to main menu")
     print('─'*60)
     
-    choice = input("\nSelect option [1-5]: ").strip()
+    choice = input("\nSelect option [1-7]: ").strip()
     
-    if choice in ["1", "2", "3"]:
-        quality = ["low_quality", "medium_quality", "high_quality"][int(choice) - 1]
-        select_and_process(quality)
+    if choice == "1":
+        select_and_process("ultra_low_quality")
+    elif choice == "2":
+        select_and_process("low_quality")
+    elif choice == "3":
+        select_and_process("medium_quality")
     elif choice == "4":
-        batch_process_folder(quality="high_quality")
+        select_and_process("high_quality")
     elif choice == "5":
+        select_and_process("ultra_high_quality")
+    elif choice == "6":
+        batch_process_folder(quality="high_quality")
+    elif choice == "7":
         return
     else:
         print(f"\n{ERR} Invalid option.")
@@ -1230,7 +1308,7 @@ def select_and_process(quality_preset):
     source_choice = input("\nSelect source [1-3]: ").strip()
     
     if source_choice == "1":
-        source_dir = DIR_AI_GENERATED
+        source_dir = DIR_AI
         auto_enhance = False
     elif source_choice == "2":
         source_dir = DIR_PHOTOS
@@ -1275,7 +1353,7 @@ def select_and_process(quality_preset):
 
 def process_single_image(image_path, quality_preset, auto_enhance=False):
     """
-    Main processing pipeline for single image.
+    Main processing pipeline for single image with comprehensive timing.
     
     Args:
         image_path: Path to source image
@@ -1283,334 +1361,417 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
         auto_enhance: Apply photo enhancement before processing
     """
     
-    start_time = time.time()
-    
-    print(f"\n{'='*60}")
-    print(f"  Processing: {image_path.name}")
-    print(f"  Quality: {quality_preset.replace('_', ' ').title()}")
-    print(f"{'='*60}")
-    
-    # Create output directory with UNIQUE name
-    project_name = safe_name_from_file(image_path)
-    output_dir = DIR_3D / f"{project_name}_{quality_preset}"
-    
-    # Ensure unique folder (add _2, _3, etc. if exists)
-    counter = 2
-    while output_dir.exists():
-        output_dir = DIR_3D / f"{project_name}_{quality_preset}_{counter}"
-        counter += 1
-    
-    output_dir.mkdir(parents=True, exist_ok=True)
-    print(f"  📁 Output folder: {output_dir.name}")
-    
-    # STEP 1: Photo enhancement (if from photos/ folder)
-    working_image = image_path
-    
+    # Calculate total steps for timing tracker
+    total_steps = 4  # Base: depth generation, extrusion, post-processing, cleanup
     if auto_enhance:
-        print(f"\n📸 Auto-enhancing photo...")
-        enhanced_path = DIR_ENHANCED / f"{image_path.stem}_enhanced.png"
-        
-        # Check if already enhanced
-        if enhanced_path.exists():
-            print(f"   Using cached enhanced version")
-            working_image = enhanced_path
-        else:
-            # Enhance and cache
-            from photo_preprocess import preprocess_photo
-            preset = cfg.get("auto_enhance_preset", "minimal")
-            
-            preprocess_photo(
-                str(image_path),
-                str(enhanced_path),
-                preset=preset,
-                save_intermediate=False
-            )
-            working_image = enhanced_path
-            print(f"   {OK} Enhanced and cached")
-    
-    # STEP 2: Background removal
+        total_steps += 1
     if REMOVE_BACKGROUND:
-        print(f"\n🎭 Removing background...")
-        nobg_path = output_dir / f"{project_name}_nobg.png"
-        
-        # Log rembg command
-        rembg_cmd = [
-            "rembg", "i",
-            str(working_image),
-            str(nobg_path)
-        ]
-        log_command_to_file(
-            output_dir,
-            "background_removal",
-            rembg_cmd,
-            "Remove background with rembg"
-        )
-        
-        working_image = remove_background_if_enabled(working_image, nobg_path)
+        total_steps += 1
+    if cfg.get("ai_enhancement", {}).get("enabled", False):
+        total_steps += 1
+    # Check if wall removal step will run
+    if float(EXTRUDE_DEFAULTS.get("f_thic", 0.05)) == 0:
+        total_steps += 1
     
-    # Copy source to output
-    shutil.copy2(working_image, output_dir / "source.png")
+    # Initialize timing tracker
+    tracker = TimingTracker(
+        total_steps=total_steps, 
+        name="2D to 3D Pipeline",
+        ok_symbol=OK,
+        warn_symbol=WARN
+    )
     
-    # STEP 3: AI Enhancement (if enabled)
-    ai_config = cfg.get("ai_enhancement", {})
-    
-    if ai_config.get("enabled", False):
-        # Get the Marigold target resolution for this quality preset
-        marigold_opts = MARIGOLD_PRESETS[quality_preset]
-        target_res = marigold_opts.get("marigold_processing_res", 768)
+    try:
+        print(f"\n{'='*60}")
+        print(f"  Processing: {image_path.name}")
+        print(f"  Quality: {quality_preset.replace('_', ' ').title()}")
+        print(f"{'='*60}")
         
-        # Check current image size
-        img = Image.open(working_image)
-        current_max = max(img.width, img.height)
+        # Create output directory with UNIQUE name
+        project_name = safe_name_from_file(image_path)
+        output_dir = DIR_3D / f"{project_name}_{quality_preset}"
         
-        # Calculate optimal upscale factor
-        ratio = target_res / current_max
+        # Ensure unique folder (add _2, _3, etc. if exists)
+        counter = 2
+        while output_dir.exists():
+            output_dir = DIR_3D / f"{project_name}_{quality_preset}_{counter}"
+            counter += 1
         
-        if ratio >= 8:
-            upscale_factor = 8
-        elif ratio >= 4:
-            upscale_factor = 4
-        elif ratio >= 2:
-            upscale_factor = 2
-        else:
-            upscale_factor = 1
+        output_dir.mkdir(parents=True, exist_ok=True)
+        print(f"  {INFO} Output: {output_dir.name}/\n")
         
-        print(f"\n🤖 AI Enhancement...")
-        print(f"   Current: {current_max}px → Target: {target_res}px → Upscale: {upscale_factor}x")
+        working_image = image_path
+        step_num = 1
         
-        enhanced_path = output_dir / f"{project_name}_ai_enhanced.png"
+        # STEP 1: Photo enhancement (if from photos/ folder)
+        if auto_enhance:
+            with tracker.step(step_num, "Photo Enhancement"):
+                tracker.substep("Checking for cached enhanced version")
+                enhanced_path = DIR_PHOTOS_ENHANCED / f"{image_path.stem}_enhanced.png"
+                
+                if enhanced_path.exists():
+                    tracker.substep("Using cached enhanced version")
+                    working_image = enhanced_path
+                else:
+                    if str(SCRIPTS_DIR / "photo_preprocessing") not in sys.path:
+                         sys.path.insert(0, str(SCRIPTS_DIR / "photo_preprocessing"))
+                    from photo_preprocess import preprocess_photo
+                    preset = cfg.get("auto_enhance_preset", "none")
+                    tracker.substep(f"Applying '{preset}' enhancement preset")
+                    
+                    preprocess_photo(
+                        str(image_path),
+                        str(enhanced_path),
+                        preset=preset,
+                        save_intermediate=True
+                    )
+                    working_image = enhanced_path
+                    tracker.substep("Enhancement cached for future use")
+            step_num += 1
         
-        # Import the function
-        if str(SCRIPTS_DIR / "photo_preprocessing") not in sys.path:
-            sys.path.insert(0, str(SCRIPTS_DIR / "photo_preprocessing"))
-        
-        try:
-            from ai_enhance import ai_enhance_image
-            
-            # Log command
-            log_command_to_file(
-                output_dir,
-                "ai_enhance",
-                [
-                    "python", "scripts/photo_preprocessing/ai_enhance.py",
+        # STEP 2: Background removal
+        nobg_path = None
+        if REMOVE_BACKGROUND:
+            with tracker.step(step_num, "Background Removal"):
+                nobg_path = output_dir / f"{project_name}_nobg.png"
+                
+                # --- PADDING LOGIC ---
+                f_thick = EXTRUDE_DEFAULTS.get("f_thic", 0.05)
+                padding_amount = 0
+                if float(f_thick) == 0:
+                    padding_amount = 10  # 10px padding
+                    tracker.substep(f"INFO: f_thic is 0, will add {padding_amount}px border.")
+                
+                # Log rembg command
+                rembg_cli_path = SCRIPTS_DIR / "photo_preprocessing" / "background_remover_removebg.py"
+                rembg_cmd = [
+                    "python", str(rembg_cli_path),
                     "--input", str(working_image),
-                    "--output", str(enhanced_path),
+                    "--output", str(nobg_path),
+                    "--method", BG_REMOVAL_METHOD,
+                    "--model", BG_REMOVAL_MODEL,
+                    "--margin", str(BG_CROP_MARGIN),
+                    "--padding", str(padding_amount) # Pass padding
+                ]
+                log_command_to_file(
+                    output_dir,
+                    "background_removal",
+                    rembg_cmd,
+                    "Remove background and add padding"
+                )
+                
+                tracker.substep(f"Removing background ({BG_REMOVAL_METHOD})")
+                working_image = remove_background_if_enabled(
+                    working_image, 
+                    nobg_path, 
+                    padding=padding_amount
+                )
+                tracker.substep("Background removed", "transparent PNG")
+            step_num += 1
+        
+        # Copy source to output
+        source_name = image_path.stem
+        if not source_name.endswith("_source"):
+            source_name += "_source"
+        source_save_path = output_dir / f"{source_name}{image_path.suffix}"
+
+        shutil.copy2(image_path, source_save_path)
+        
+        # STEP 3: AI Enhancement (if enabled)
+        ai_config = cfg.get("ai_enhancement", {})
+        
+        if ai_config.get("enabled", False):
+            with tracker.step(step_num, "AI Upscaling & Enhancement"):
+                marigold_opts = MARIGOLD_PRESETS[quality_preset]
+                target_res = marigold_opts.get("marigold_processing_res", 768)
+                
+                img = Image.open(working_image)
+                current_max = max(img.width, img.height)
+                
+                ratio = target_res / current_max
+                if ratio >= 8: upscale_factor = 8
+                elif ratio >= 4: upscale_factor = 4
+                elif ratio >= 2: upscale_factor = 2
+                else: upscale_factor = 1
+                
+                tracker.substep(f"Analyzing image size", f"{current_max}px → target {target_res}px")
+                tracker.substep(f"Upscale factor selected", f"{upscale_factor}x")
+                
+                enhanced_path = output_dir / f"{project_name}_ai_enhanced.png"
+                
+                # --- CONVERT TO CLI CALL ---
+                ai_enhance_cli = SCRIPTS_DIR / "photo_preprocessing" / "ai_enhance.py"
+                script_cwd = ai_enhance_cli.parent
+                
+                rel_input_path = os.path.relpath(working_image, script_cwd)
+                rel_output_path = os.path.relpath(enhanced_path, script_cwd)
+
+                cmd = [
+                    "python", ai_enhance_cli.name,
+                    "--input", rel_input_path,
+                    "--output", rel_output_path,
                     "--upscale", str(upscale_factor),
                     "--method", ai_config.get('upscale_method', 'realesrgan'),
                     "--max-size", str(ai_config.get('max_input_size', 2048)),
                     "--clarity", str(ai_config.get('clarity_strength', 1.3)),
                     "--detail", str(ai_config.get('detail_amount', 1.2)),
                     "--sharpen", str(ai_config.get('sharpen_strength', 150))
-                ],
-                "AI upscale and enhance image"
-            )
-            
-            ai_enhance_image(
-                str(working_image),
-                str(enhanced_path),
-                upscale_factor=upscale_factor,
-                upscale_method=ai_config.get("upscale_method", "realesrgan"),
-                max_input_size=ai_config.get("max_input_size", 2048),
-                clarity_strength=ai_config.get("clarity_strength", 1.3),
-                detail_amount=ai_config.get("detail_amount", 1.2),
-                sharpen_strength=ai_config.get("sharpen_strength", 150),
-                auto_fallback=True
-            )
-            working_image = enhanced_path
-            print(f"   {OK} AI enhanced: {enhanced_path.name}")
-        except Exception as e:
-            print(f"   {WARN} AI enhancement failed: {e}")
-            print(f"   {WARN} Continuing with original image...")
-            import traceback
-            traceback.print_exc()
-    else:
-        print(f"\n🤖 AI Enhancement: DISABLED")
-    
-    # STEP 4: Prepare for Marigold (composite transparent images)
-    marigold_input = working_image
-    
-    if REMOVE_BACKGROUND:
-        img = Image.open(working_image)
+                ]
+
+                log_command_to_file(
+                    output_dir, "ai_enhance", cmd, "AI upscale and enhance image"
+                )
+                
+                full_cmd = conda_prefix_cmd(PHOTO_PREP_ENV, cmd)
+                tracker.substep("Running AI enhancement pipeline")
+                
+                try:
+                    rc, output = run_cmd(full_cmd, cwd=script_cwd, clean_env=True)
+                    if rc != 0:
+                        raise RuntimeError(f"AI enhancement failed.\n{output}")
+                    
+                    working_image = enhanced_path
+                    tracker.substep("AI enhancement complete", enhanced_path.name)
+                except Exception as e:
+                    print(f"  {WARN} AI enhancement failed: {e}")
+                    tracker.substep("AI enhancement failed, using original")
+            step_num += 1
+        else:
+            print(f"\n{INFO} AI Enhancement: DISABLED (set ai_enhancement.enabled=true in config)")
         
-        if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
-            # Get background color from config
-            bg_color = cfg.get("marigold_background_color", "white")
+        # STEP 4: Prepare for Marigold (composite transparent images)
+        marigold_input = working_image
+        
+        if REMOVE_BACKGROUND:
+            img = Image.open(working_image)
             
-            # Map color names to RGB values
-            bg_colors = {
-                "gray": (128, 128, 128),
-                "grey": (128, 128, 128),
-                "white": (255, 255, 255),
-                "black": (0, 0, 0),
-                "light_gray": (192, 192, 192),
-                "dark_gray": (64, 64, 64)
+            if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+                bg_color = cfg.get("marigold_background_color", "white")
+                bg_colors = {
+                    "gray": (128, 128, 128), "grey": (128, 128, 128),
+                    "white": (255, 255, 255), "black": (0, 0, 0),
+                    "light_gray": (192, 192, 192), "dark_gray": (64, 64, 64)
+                }
+                
+                if bg_color in bg_colors:
+                    bg_rgb = bg_colors[bg_color]
+                else:
+                    try:
+                        if isinstance(bg_color, str) and bg_color.startswith('#'):
+                            bg_rgb = tuple(int(bg_color[i:i+2], 16) for i in (1, 3, 5))
+                        else: bg_rgb = (128, 128, 128)
+                    except: bg_rgb = (128, 128, 128)
+                
+                print(f"  Compositing onto {bg_color} background {bg_rgb}...")
+                
+                if img.mode != 'RGBA': img = img.convert('RGBA')
+                
+                background = Image.new('RGB', img.size, bg_rgb)
+                background.paste(img, (0, 0), img)
+                
+                prepared_path = output_dir / f"{project_name}_prepared_for_marigold.png"
+                background.save(prepared_path, 'PNG')
+                
+                log_command_to_file(
+                    output_dir,
+                    "composite_background",
+                    ["# Composited with background color:", str(bg_rgb)],
+                    f"Applied {bg_color} background before Marigold"
+                )
+                marigold_input = prepared_path
+
+        # STEP 5: Generate depth map
+        with tracker.step(step_num, "Depth Map Generation"):
+            depth_path = output_dir / f"{project_name}_depth_16bit.png"
+            marigold_opts = MARIGOLD_PRESETS[quality_preset]
+            
+            tracker.substep("Initializing Marigold pipeline")
+            tracker.substep(f"Configuration", f"steps={marigold_opts.get('marigold_steps')} ensemble={marigold_opts.get('marigold_ensemble')} res={marigold_opts.get('marigold_processing_res')}")
+            
+            if cfg.get('region_processing', {}).get('enabled', False):
+                run_marigold_with_regions(marigold_input, depth_path, cfg, tracker)
+            else:
+                run_marigold_cli(marigold_input, depth_path, marigold_opts, MARIGOLD_MODEL_PATH, tracker)
+            
+            tracker.substep("Depth map generated", f"{depth_path.name}")
+            
+            # Mask depth map with alpha channel
+            if REMOVE_BACKGROUND:
+                try:
+                    # 'working_image' is the final, padded, transparent file
+                    alpha_source_path = working_image 
+                    
+                    if not alpha_source_path.exists():
+                         alpha_source_path = output_dir / f"{project_name}_nobg.png" # Fallback
+
+                    if alpha_source_path.exists():
+                        if str(SCRIPTS_DIR / "photo_preprocessing") not in sys.path:
+                             sys.path.insert(0, str(SCRIPTS_DIR / "photo_preprocessing"))
+                        from depth_masking import mask_depth_with_alpha
+                        tracker.substep(f"Applying alpha mask from {alpha_source_path.name}")
+                        mask_depth_with_alpha(depth_path, alpha_source_path)
+                        tracker.substep("Depth mask applied")
+                    else:
+                        print(f"  {WARN} Could not find alpha source {alpha_source_path.name}, skipping mask.")
+                except Exception as e:
+                    print(f"  {WARN} Could not mask depth map: {e}")
+        step_num += 1
+        
+        # STEP 6: Extrude to 3D model
+        with tracker.step(step_num, "3D Model Creation"):
+            stl_raw_path = output_dir / f"{project_name}_raw.stl"
+            tracker.substep("Converting depth to 3D mesh")
+            
+            # This is the file we will send to the *next* step
+            # It starts as the raw file, but may be replaced by the wall removal step
+            stl_for_repair = stl_raw_path
+            
+            # run_extrude_cli already does logging, so we just call it
+            run_extrude_cli(depth_path, stl_raw_path, EXTRUDE_DEFAULTS)
+            tracker.substep("3D models created", "STL, GLB, OBJ")
+        step_num += 1
+        
+        # STEP 7: Wall Removal (if enabled)
+        f_thick = EXTRUDE_DEFAULTS.get("f_thic", 0.05)
+        if float(f_thick) == 0:
+            with tracker.step(step_num, "Wall Removal"):
+                tracker.substep("Removing frame walls (f_thic=0)")
+        
+                stl_no_walls_path = output_dir / f"{project_name}_no_walls.stl"
+                
+                remove_walls_cli = SCRIPTS_DIR / "model_generation" / "remove_walls.py"
+                script_cwd = remove_walls_cli.parent
+
+                rel_input_path = os.path.relpath(stl_raw_path, script_cwd)
+                rel_output_path = os.path.relpath(stl_no_walls_path, script_cwd)
+
+                cmd = [
+                    "python", remove_walls_cli.name,
+                    "--input", rel_input_path,
+                    "--output", rel_output_path,
+                    "--frame-thickness", "0.0"
+                ]
+
+                log_command_to_file(
+                    output_dir,
+                    "remove_walls",
+                    cmd,
+                    "Remove 0-thickness walls and add solid bottom"
+                )
+
+                full_cmd = conda_prefix_cmd(DEPTH_ENV, cmd)
+                
+                try:
+                    rc, output = run_cmd(full_cmd, cwd=script_cwd, clean_env=True)
+                    if rc != 0:
+                        raise RuntimeError(f"Wall removal failed.\n{output}")
+
+                    stl_for_repair = stl_no_walls_path # <-- IMPORTANT: Update the file for the next step
+                    tracker.substep("Frame walls removed", stl_no_walls_path.name)
+                except Exception as e:
+                    print(f"  {WARN} Wall removal failed: {e}")
+                    stl_for_repair = stl_raw_path # Fallback
+            step_num += 1
+        
+        # --- OLD, BUGGY STEP 7 IS GONE ---
+        
+        # STEP 8: Mesh Post-Processing
+        with tracker.step(step_num, "Mesh Post-Processing"):
+            if str(SCRIPTS_DIR / "model_generation") not in sys.path:
+                 sys.path.insert(0, str(SCRIPTS_DIR / "model_generation"))
+            from mesh_postprocess import should_repair_for_quality, repair_mesh_via_subprocess
+            
+            should_repair, repair_settings = should_repair_for_quality(quality_preset, cfg)
+            
+            # This 'stl_for_repair' is now the *correct* file
+            # (either _no_walls.stl or _raw.stl)
+            
+            if should_repair:
+                tracker.substep(f"Mesh repair enabled for {quality_preset.replace('_', ' ')}")
+                stl_final_path = output_dir / f"{project_name}.stl"
+                
+                # --- LOG THE MESH REPAIR COMMAND ---
+                mesh_repair_cli = SCRIPTS_DIR / "model_generation" / "mesh_repair_cli.py"
+                cmd = [
+                    "python", str(mesh_repair_cli), # Use str() here for the full path
+                    "--input", str(stl_for_repair),
+                    "--output", str(stl_final_path),
+                    "--smooth", str(repair_settings.get('smooth_iterations', 0)),
+                    "--target-faces", str(repair_settings.get('target_faces', 0))
+                ]
+                if not repair_settings.get('fill_holes', True):
+                    cmd.append("--no-fill-holes")
+                if not repair_settings.get('ensure_manifold', True):
+                    cmd.append("--no-manifold")
+
+                log_command_to_file(
+                    output_dir, "mesh_repair", cmd, "Repair and optimize mesh"
+                )
+                # --- END LOGGING ---
+
+                try:
+                    # We call the *wrapper* which builds the real conda command
+                    repair_mesh_via_subprocess(
+                        stl_for_repair,
+                        stl_final_path, 
+                        repair_settings,
+                        CONDA_EXE,
+                        DEPTH_ENV
+                    )
+                    tracker.substep("Mesh repaired", stl_final_path.name)
+                    
+                    if cfg.get("mesh_repair_settings", {}).get("save_before_repair", True):
+                        before_repair_path = output_dir / stl_for_repair.name
+                        if stl_for_repair != before_repair_path:
+                             shutil.copy2(stl_for_repair, before_repair_path)
+                        tracker.substep("Pre-repair mesh saved", before_repair_path.name)
+                        
+                except Exception as e:
+                    print(f"  {ERR} Mesh repair failed: {e}")
+                    tracker.substep("Using unrepaired mesh")
+                    stl_final_path = stl_for_repair
+            else:
+                tracker.substep(f"Mesh repair disabled for {quality_preset.replace('_', ' ')}")
+                stl_final_path = stl_for_repair
+            
+            # Clean up the final file name if no repair was done
+            if stl_final_path != (output_dir / f"{project_name}.stl"):
+                 shutil.copy2(stl_final_path, output_dir / f"{project_name}.stl")
+                 stl_final_path = output_dir / f"{project_name}.stl"
+
+            # Delete unwanted formats
+            output_formats = {
+                'stl': EXTRUDE_DEFAULTS.get('output_stl', True),
+                'glb': EXTRUDE_DEFAULTS.get('output_glb', False),
+                'obj': EXTRUDE_DEFAULTS.get('output_obj', False)
             }
             
-            if bg_color in bg_colors:
-                bg_rgb = bg_colors[bg_color]
-            else:
-                # Try to parse as RGB tuple or hex
-                try:
-                    if isinstance(bg_color, str) and bg_color.startswith('#'):
-                        # Hex color
-                        bg_rgb = tuple(int(bg_color[i:i+2], 16) for i in (1, 3, 5))
-                    else:
-                        # Default to gray
-                        bg_rgb = (128, 128, 128)
-                except:
-                    bg_rgb = (128, 128, 128)
+            delete_base = stl_raw_path.with_suffix('')
             
-            print(f"  Compositing onto {bg_color} background {bg_rgb}...")
-            
-            if img.mode != 'RGBA':
-                img = img.convert('RGBA')
-            
-            background = Image.new('RGB', img.size, bg_rgb)
-            background.paste(img, (0, 0), img)
-            
-            prepared_path = output_dir / f"{project_name}_prepared_for_marigold.png"
-            background.save(prepared_path, 'PNG')
-            
-            # Log the compositing step
-            log_command_to_file(
-                output_dir,
-                "composite_background",
-                ["# Composited with background color:", str(bg_rgb)],
-                f"Applied {bg_color} background before Marigold"
-            )
-            
-            marigold_input = prepared_path
-            print(f"  ✓ Prepared: {prepared_path.name}")
-    
-    print(f"\n  ➡️ FINAL marigold_input = {marigold_input.name}")
-
-    # STEP 5: Generate depth map
-    depth_path = output_dir / f"{project_name}_depth_16bit.png"
-    marigold_opts = MARIGOLD_PRESETS[quality_preset]
-    
-    # Use regional processing if enabled, otherwise standard
-    if cfg.get('region_processing', {}).get('enabled', False):
-        run_marigold_with_regions(marigold_input, depth_path, cfg)
-    else:
-        run_marigold_cli(marigold_input, depth_path, marigold_opts)
-    
-    # STEP 6: Mask depth map with alpha channel
-    if REMOVE_BACKGROUND and marigold_input.suffix.lower() == '.png':
-        try:
-            # Use the background-removed image for masking
-            nobg_image = output_dir / f"{project_name}_nobg.png"
-            if nobg_image.exists():
-                from depth_masking import mask_depth_with_alpha
-                mask_depth_with_alpha(depth_path, nobg_image)
-                print(f"   {OK} Depth map masked with alpha channel")
-        except Exception as e:
-            print(f"   {WARN} Could not mask depth map: {e}")
-            print(f"   {WARN} Continuing with unmasked depth...")
-    
-    # STEP 7: Extrude to 3D model
-    stl_raw_path = output_dir / f"{project_name}_raw.stl"
-    run_extrude_cli(depth_path, stl_raw_path, EXTRUDE_DEFAULTS)
-    
-    # STEP 8: Trim borders (if enabled and needed)
-    stl_for_repair = stl_raw_path
-    
-    if cfg.get("trim_borders_before_repair", False):
-        print(f"\n✂️ Trimming border frame...")
+            for fmt, keep in output_formats.items():
+                if not keep:
+                    file_path = delete_base.with_suffix(f'.{fmt}')
+                    if file_path.exists():
+                        file_path.unlink()
+                        tracker.substep(f"Removed unwanted format", file_path.name)
+        step_num += 1
         
-        stl_trimmed_path = output_dir / f"{project_name}_trimmed.stl"
-        
-        # Call trim script via subprocess
-        trim_script = SCRIPTS_DIR / "model_generation" / "trim_borders.py"
-        
-        if not trim_script.exists():
-            print(f"  {WARN} trim_borders.py not found, skipping trim")
-            stl_for_repair = stl_raw_path
-        else:
-            cmd = ["python", str(trim_script),
-                   "--input", str(stl_raw_path),
-                   "--output", str(stl_trimmed_path)]
-            
-            full_cmd = conda_prefix_cmd(DEPTH_ENV, cmd)
-            
+        # Clean up source file if configured
+        if cfg.get("delete_source_after_processing", False):
             try:
-                rc, output = run_cmd(full_cmd)
-                
-                if rc == 0:
-                    stl_for_repair = stl_trimmed_path
-                    print(f"  {OK} Borders trimmed: {stl_trimmed_path.name}")
-                else:
-                    print(f"  {WARN} Border trimming failed")
-                    stl_for_repair = stl_raw_path
-                    
-            except Exception as e:
-                print(f"  {WARN} Border trimming error: {e}")
-                stl_for_repair = stl_raw_path
-    else:
-        stl_for_repair = stl_raw_path
-    
-    # STEP 9: Mesh repair (quality-dependent)
-    from mesh_postprocess import should_repair_for_quality, repair_mesh_via_subprocess
-    
-    should_repair, repair_settings = should_repair_for_quality(quality_preset, cfg)
-    
-    if should_repair:
-        print(f"\n🔧 Mesh repair enabled for {quality_preset.replace('_', ' ')}")
+                image_path.unlink()
+                print(f"  {TRASH} Deleted source file")
+            except:
+                pass
         
-        stl_final_path = output_dir / f"{project_name}.stl"
+        # Print comprehensive summary
+        tracker.print_summary(output_info=f"Output: {output_dir.name}/")
         
-        try:
-            repair_mesh_via_subprocess(
-                stl_for_repair,
-                stl_final_path, 
-                repair_settings,
-                CONDA_EXE,
-                DEPTH_ENV
-            )
-            print(f"  {OK} Mesh repaired: {stl_final_path.name}")
-            
-            if cfg.get("mesh_repair_settings", {}).get("save_before_repair", True):
-                print(f"  {INFO} Raw mesh saved: {stl_raw_path.name}")
-            
-        except Exception as e:
-            print(f"  {ERR} Mesh repair failed: {e}")
-            print(f"  {INFO} Using unrepaired mesh")
-            stl_final_path = stl_raw_path
-    else:
-        print(f"\n{INFO} Mesh repair disabled for {quality_preset.replace('_', ' ')}")
-        stl_final_path = stl_for_repair
-
-    # STEP 10: Delete unwanted formats
-    output_formats = {
-        'stl': EXTRUDE_DEFAULTS.get('output_stl', True),
-        'glb': EXTRUDE_DEFAULTS.get('output_glb', False),
-        'obj': EXTRUDE_DEFAULTS.get('output_obj', False)
-    }
-    
-    for fmt, keep in output_formats.items():
-        if not keep:
-            file_path = stl_final_path.with_suffix(f'.{fmt}')
-            if file_path.exists():
-                file_path.unlink()
-                print(f"  🗑️ Removed unwanted format: {file_path.name}")
-    
-    # Clean up source file if configured
-    if cfg.get("delete_source_after_processing", False):
-        try:
-            image_path.unlink()
-            print(f"   {TRASH} Deleted source file")
-        except:
-            pass
-
-    # Calculate total time
-    elapsed = time.time() - start_time
-    mins, secs = divmod(int(elapsed), 60)
-    time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
-    
-    print(f"\n{'='*60}")
-    print(f"{OK} COMPLETE!")
-    print(f"   Output: {output_dir.name}/")
-    print(f"   Total time: {time_str}")
-    print(f"{'='*60}")
+    except Exception as e:
+        print(f"\n{ERR} Processing failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
 
 
 def reprocess_depth_map(depth_path):
@@ -1677,13 +1838,13 @@ def batch_process_folder(quality="high_quality"):
     choice = input("\nSelect [1-3]: ").strip()
     
     if choice == "1":
-        source_dir = DIR_AI_GENERATED
+        source_dir = DIR_AI
         auto_enhance = False
-        print(f"\n📁 Batch processing: {source_dir.relative_to(HERE.parent)}")
+        print(f"\n{INFO} Batch processing: {source_dir.relative_to(HERE.parent)}")
     elif choice == "2":
         source_dir = DIR_PHOTOS
         auto_enhance = True
-        print(f"\n📁 Batch processing: {source_dir.relative_to(HERE.parent)}")
+        print(f"\n{INFO} Batch processing: {source_dir.relative_to(HERE.parent)}")
     elif choice == "3":
         return
     else:
@@ -1706,7 +1867,7 @@ def batch_process_folder(quality="high_quality"):
     batch_start = time.time()
     
     for i, image_path in enumerate(files, 1):
-        print(f"\n[{i}/{len(files)}]")
+        print(f"\n--- BATCH PROGRESS: {i}/{len(files)} ---")
         try:
             process_single_image(image_path, quality, auto_enhance)
         except Exception as e:
@@ -1850,9 +2011,108 @@ def build_full_prompt(subject: str, prompt_style: str, prompts_data: dict) -> st
     return full_prompt
 
 
+def run_automated(args):
+    """
+    Run pipeline in automated test mode with CLI arguments.
+    
+    Args:
+        args: Parsed command-line arguments
+    """
+    # Validate required args
+    if not args.input:
+        print(f"{ERR} --input is required in test mode")
+        sys.exit(1)
+    
+    input_path = Path(args.input)
+    if not input_path.exists():
+        print(f"{ERR} Input file not found: {input_path}")
+        sys.exit(1)
+    
+    # Determine quality preset
+    if args.quality:
+        quality_key = f"{args.quality}_quality"
+    else:
+        quality_key = "medium_quality"  # Default
+    
+    if quality_key not in MARIGOLD_PRESETS:
+        print(f"{ERR} Unknown quality preset: {args.quality}")
+        print(f"Available presets: {', '.join(MARIGOLD_PRESETS.keys())}")
+        sys.exit(1)
+    
+    # Get base configurations
+    marigold_preset = MARIGOLD_PRESETS[quality_key].copy()
+    extrude_settings = EXTRUDE_DEFAULTS.copy()
+    
+    # Apply CLI overrides
+    marigold_preset, extrude_settings = apply_cli_overrides(
+        marigold_preset, extrude_settings, args
+    )
+    
+    # Print configuration
+    print(f"\n{'='*60}")
+    print(f"  AUTOMATED TEST MODE")
+    print(f"{'='*60}")
+    print(f"  Input: {input_path.name}")
+    print(f"  Base preset: {args.quality or 'medium'}")
+    
+    # Show overrides if any
+    overrides = []
+    if args.steps: overrides.append(f"steps={args.steps}")
+    if args.ensemble: overrides.append(f"ensemble={args.ensemble}")
+    if args.resolution: overrides.append(f"resolution={args.resolution}")
+    if args.emboss: overrides.append(f"emboss={args.emboss}")
+    if args.smoothing: overrides.append(f"smoothing={args.smoothing}")
+    if args.near is not None: overrides.append(f"near={args.near}")
+    if args.far is not None: overrides.append(f"far={args.far}")
+    if args.width: overrides.append(f"width={args.width}")
+    
+    if overrides:
+        print(f"  Overrides: {', '.join(overrides)}")
+    
+    print(f"\n  Final Configuration:")
+    print(f"    Marigold: steps={marigold_preset.get('marigold_steps')} " +
+          f"ensemble={marigold_preset.get('marigold_ensemble')} " +
+          f"res={marigold_preset.get('marigold_processing_res')}")
+    print(f"    Extrusion: emboss={extrude_settings.get('emboss')} " +
+          f"smoothing={extrude_settings.get('smoothing')} " +
+          f"near/far={extrude_settings.get('near_offset')}/{extrude_settings.get('far_offset')}")
+    print(f"{'='*60}")
+    
+    # Determine auto_enhance based on source
+    auto_enhance = False
+    if input_path.parent == DIR_PHOTOS:
+        auto_enhance = cfg.get("auto_enhance_photos", True)
+    
+    # Override if CLI flag set
+    if args.no_enhancement:
+        auto_enhance = False
+    
+    # Temporarily override REMOVE_BACKGROUND if flag set
+    global REMOVE_BACKGROUND
+    original_bg_setting = REMOVE_BACKGROUND
+    if args.no_bg_removal:
+        REMOVE_BACKGROUND = False
+    
+    try:
+        # Update the global presets for this run
+        MARIGOLD_PRESETS[quality_key] = marigold_preset
+        EXTRUDE_DEFAULTS.update(extrude_settings)
+        
+        # Run processing
+        process_single_image(input_path, quality_key, auto_enhance)
+    finally:
+        # Restore original setting
+        REMOVE_BACKGROUND = original_bg_setting
+
+
 if __name__ == "__main__":
     try:
-        main_menu()
+        args = parse_cli_args()
+        
+        if args.test_mode:
+            run_automated(args)
+        else:
+            main_menu()
+            
     except KeyboardInterrupt:
-        print("\n\n👋 Interrupted by user. Goodbye!")
-
+        print("\n\nInterrupted by user. Exiting...")

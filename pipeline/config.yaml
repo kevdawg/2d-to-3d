@@ -6,18 +6,22 @@
 # Environment Configuration
 # ----------------------------------------
 conda_exe: "conda"
-imagen_env: "imagen"              # For Imagen 3 generation
+imagen_env: "aigen"              # For Imagen 3 generation
 marigold_env: "marigold"          # For depth estimation
 depth_env: "depth-to-3d"          # For 3D extrusion
 photo_prep_env: "photo-prep"      # For photo enhancement (if needed)
 use_conda: true
+
 
 # ----------------------------------------
 # File Paths (relative to pipeline folder)
 # ----------------------------------------
 marigold_cli: "../scripts/depth_generation/marigold_cli.py"
 extrude_cli: "../scripts/model_generation/extrude_cli.py"
-rembg_models: "../models/rembg_models"
+models:
+  marigold: "models/marigold_model"
+  realesrgan: "models/RealESRGAN"
+  rembg: "models/rembg_models"
 
 # Folder Structure
 dir_ai_generated: "../data/AI_files"      # AI-generated images
@@ -37,14 +41,14 @@ allow_custom_prompts: true       # Allow users to enter full custom prompts
 # Photo Enhancement (Auto-Applied)
 # ----------------------------------------
 auto_enhance_photos: false                 # Auto-enhance photos from photos/ folder
-auto_enhance_preset: "minimal"            # Options: "none", "minimal", "balanced", "heavy"
+auto_enhance_preset: "light"                # Options: "none", "light", "balanced", "heavy"
 
 # ----------------------------------------
 # Background Removal
 # ----------------------------------------
 remove_background: true
 bg_removal_method: "rembg"  # "removebg" ($0.01/image) or "rembg" (free)
-bg_removal_model: "isnet-general-use"
+bg_removal_model: "u2net" #"isnet-general-use"
 bg_crop_enabled: true
 bg_crop_margin: 10
 mask_depth_map: true
@@ -78,6 +82,13 @@ segment_processing:
 # Marigold Depth Generation Presets
 # ----------------------------------------
 marigold_presets:
+
+  ultra_low_quality:
+    marigold_steps: 3
+    marigold_ensemble: 1
+    marigold_processing_res: 384
+    marigold_match_input_res: false
+    marigold_enhance_photo: false
   
   low_quality:
     marigold_steps: 5
@@ -91,7 +102,7 @@ marigold_presets:
     marigold_ensemble: 3
     marigold_processing_res: 768
     marigold_match_input_res: false
-    marigold_enhance_photo: true
+    marigold_enhance_photo: false
 
   high_quality:
     marigold_steps: 20
@@ -100,10 +111,17 @@ marigold_presets:
     marigold_match_input_res: false
     marigold_enhance_photo: false
 
+  ultra_high_quality:
+    marigold_steps: 30
+    marigold_ensemble: 10
+    marigold_processing_res: 1536
+    marigold_match_input_res: false
+    marigold_enhance_photo: false
+
 # ----------------------------------------
 # Marigold Depth Generation
 # ----------------------------------------
-marigold_background_color: "gray"  # Options: "gray", "white", "black", "light_gray", "dark_gray", or hex "#RRGGBB"
+marigold_background_color: "white"  # Options: "gray", "white", "black", "light_gray", "dark_gray", or hex "#RRGGBB"
 # Gray (128,128,128) = neutral mid-depth
 # White (255,255,255) = far depth (background recedes)
 # Black (0,0,0) = near depth (background comes forward)
@@ -123,12 +141,34 @@ extrude_defaults:
   f_back: 0.05
   vertex_colors: false
   scene_lights: false
-  prepare_for_3d_printing: true
   zip_outputs: false
   # Output formats (at least one must be true)
   output_stl: true          # STL format (3D printing standard)
   output_glb: false         # GLB format (web viewing, has colors/lights)
   output_obj: false         # OBJ format (widely supported)
+
+extrude_subtle:
+  emboss: 0.15
+  near_offset: 0.0
+  far_offset: 0.6
+  smoothing: 1
+
+extrude_moderate:
+  emboss: 0.3
+  near_offset: 0.1
+  far_offset: 0.8
+  smoothing: 3
+
+extrude_dramatic:
+  emboss: 0.5
+  near_offset: 0.2
+  far_offset: 0.1
+  smoothing: 5
+extrude_extreme:
+  emboss: 0.8
+  near_offset: 0.3
+  far_offset: 0.1
+  smoothing: 7
 
 # ----------------------------------------
 # Region-Specific Processing
@@ -177,19 +217,27 @@ region_processing:
 # ----------------------------------------
 # Mesh Repair & Optimization
 # ----------------------------------------
-enable_mesh_repair: "auto"
+enable_mesh_repair: true #"auto" false
 trim_borders_before_repair: false
 mesh_repair_settings:
-  smooth_iterations: 1           # Keep minimal
+  smooth_iterations: 0           # Keep minimal
   target_faces: 0                # No decimation by default
   fill_holes: false              # CHANGED: Don't fill holes in relief models
   ensure_manifold: false         # CHANGED: Relief models aren't manifold volumes
   save_before_repair: true
 
-# Quality-dependent repair rules
+# Quality-dependent repair rules is repair is set to 'auto'
 mesh_repair_by_quality:
+  ultra_low_quality:
+    smooth_iterations: 1
+    target_faces: 100000
+    fill_holes: true
+    ensure_manifold: true
+    save_before_repair: true
+    enabled: true
   low_quality:
     enabled: false
+    fill_holes: false
   medium_quality:
     enabled: false
     smooth_iterations: 1         # REDUCED from 2
@@ -202,6 +250,12 @@ mesh_repair_by_quality:
     target_faces: 200000
     fill_holes: false            # ADDED
     ensure_manifold: false       # ADDED
+  ultra_high_quality:
+    enabled: true
+    smooth_iterations: 1         # REDUCED from 2
+    target_faces: 400000
+    fill_holes: true            # ADDED
+    ensure_manifold: false       # ADDED
 
 # ----------------------------------------
 # AI Enhancement (before depth generation)
@@ -210,8 +264,8 @@ ai_enhancement:
   enabled: true  # Set to false to skip AI enhancement
   
   # Upscaling method
-  upscale_method: "realesrgan"  # Great general purpose
-  #upscale_method: "lanczos"  # Fast!
+  #upscale_method: "realesrgan"  # Great general purpose
+  upscale_method: "lanczos"  # Fast!
   #upscale_method: "waifu2x"  # Great for anime characters
   #upscale_method: "gfpgan"  # Specialized for faces
   

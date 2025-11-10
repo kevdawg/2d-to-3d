@@ -2,35 +2,38 @@
 # Purpose: Photo preprocessing (enhancement, background removal, analysis, ROI detection)
 # Python: 3.10+
 
-# Image processing
+# INSTALLATION ORDER MATTERS - install in this sequence
+
+# 1. Core PyTorch (must be first)
+torch==2.1.0
+torchvision==0.16.0
+
+# 2. Image processing libraries
 opencv-python==4.8.1.78
 opencv-contrib-python==4.8.1.78
 pillow==10.1.0
 numpy==1.24.3
 
-# Background removal
+# 3. Background removal
 rembg==2.0.50
 onnxruntime==1.16.3
 
-# Configuration files
+# 4. Configuration and utilities
 pyyaml>=6.0
 requests>=2.31.0
-
-# Regional processing / ROI detection
-torch>=2.0.0
-torchvision>=0.15.0
-git+https://github.com/facebookresearch/segment-anything.git
-
-# Grounding DINO for prompt-based detection
-groundingdino-py>=0.1.0
-# Alternative if above doesn't work:
-# git+https://github.com/IDEA-Research/GroundingDINO.git
-
-# Progress bars
 tqdm>=4.65.0
-
 trimesh>=4.9.0
 
-# Face restoration (optional but recommended)
-gfpgan>=1.3.8
+# 5. Transformers (before AI image packages)
+transformers==4.35.2
+
+# 6. Core AI image processing (in this order)
 basicsr>=1.4.2
+realesrgan>=0.3.0
+gfpgan>=1.3.8
+
+# 7. Regional processing / ROI detection
+git+https://github.com/facebookresearch/segment-anything.git
+
+# 8. Grounding DINO for prompt-based detection
+groundingdino-py>=0.1.0

@@ -122,7 +122,6 @@ def extrude_depth_3d(
     f_back=0.00,
     vertex_colors=True,
     scene_lights=True,
-    prepare_for_3d_printing=True,
     zip_outputs=False,
 ):
     """
@@ -382,12 +381,6 @@ def extrude_depth_3d(
             mesh.apply_transform(z_scale_matrix)
             
             print(f"  Applied max height: {target_max_height}mm (scaled Z by {height_scale:.2f}x)")
-
-    if prepare_for_3d_printing:
-        rotation_mat = trimesh.transformations.rotation_matrix(
-            np.radians(90), [-1, 0, 0]
-        )
-        mesh.apply_transform(rotation_mat)
 
     if path_out_base is None:
         path_out_base = os.path.splitext(path_depth)[0].replace("_16bit", "")

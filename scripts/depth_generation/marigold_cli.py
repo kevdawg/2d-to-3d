@@ -13,28 +13,19 @@ import sys
 import os
 import platform
 
+os.environ["TQDM_ASCII"] = "True"  # Force ASCII progress bars
+
 try:
     from diffusers import MarigoldDepthPipeline
 except Exception as e:
     print(f"ERROR: could not import required libraries. Ensure you're running this inside the marigold conda env.\n{e}")
     sys.exit(2)
 
-# Windows-safe symbols
-def is_windows_cmd():
-    if platform.system() != 'Windows':
-        return False
-    if 'WT_SESSION' in os.environ:  # Windows Terminal
-        return False
-    return True
-
-if is_windows_cmd():
-    OK = "[OK]"
-    ERR = "[X]"
-    INFO = "[i]"
-else:
-    OK = "✅"
-    ERR = "❌"
-    INFO = "ℹ️"
+OK = "[OK]"
+ERR = "[X]"
+WARN = "[!]"
+TRASH = "[DEL]"
+INFO = "[i]"
 
 
 def download_model_if_needed(checkpoint_path: str):
@@ -116,9 +107,12 @@ def main():
     p.add_argument("--input", required=True, help="Path to the input image file.")
     p.add_argument("--output", required=True, help="Path to save the output 16-bit depth PNG.")
     
+    # Default checkpoint location, but allow override
     script_dir = os.path.dirname(os.path.realpath(__file__))
     default_checkpoint = os.path.join(script_dir, '..', '..', 'models', 'marigold_model')
-    p.add_argument("--checkpoint", default=default_checkpoint, help="Path to the Marigold model directory.")
+    
+    p.add_argument("--checkpoint", default=default_checkpoint, 
+                   help=f"Path to the Marigold model directory (default: {default_checkpoint})")
 
     p.add_argument("--steps", type=int, default=10, help="Number of inference steps.")
     p.add_argument("--ensemble", type=int, default=1, help="Ensemble size.")
@@ -172,7 +166,8 @@ def main():
         leave=False,
         dynamic_ncols=True,
         position=0,
-        disable=False
+        disable=False,
+        ascii=True
     )
 
     print(f"Running Marigold depth estimation")

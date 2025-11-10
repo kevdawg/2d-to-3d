@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Background Removal using remove.bg API
-High quality background removal ($0.20 per image after 50 free credits/month)
-Includes automatic cropping to remove transparent borders.
+Background Removal using remove.bg API or rembg.
+High quality background removal.
+Includes automatic cropping and optional transparent padding.
 """
 import os
 import sys
@@ -10,6 +10,40 @@ from pathlib import Path
 from PIL import Image
 import requests
 import numpy as np
+
+OK = "[OK]"
+ERR = "[X]"
+WARN = "[!]"
+TRASH = "[DEL]"
+INFO = "[i]"
+
+def add_transparent_padding(image, padding):
+    """
+    Adds transparent padding around an image.
+    
+    Args:
+        image: PIL Image in RGBA mode
+        padding: Pixels to add to all sides
+    
+    Returns:
+        Padded PIL Image
+    """
+    if padding <= 0:
+        return image
+    
+    print(f"    Adding {padding}px transparent padding...")
+    original_size = (image.width, image.height)
+    new_size = (image.width + 2 * padding, image.height + 2 * padding)
+    
+    # Create a new, larger transparent canvas
+    padded_img = Image.new('RGBA', new_size, (0, 0, 0, 0)) # Fully transparent
+    
+    # Paste the original image into the center
+    paste_position = (padding, padding)
+    padded_img.paste(image, paste_position, image)
+    
+    print(f"    Padded: {original_size[0]}x{original_size[1]} → {new_size[0]}x{new_size[1]}")
+    return padded_img
 
 
 def crop_transparent_borders(image, margin=10):
@@ -61,22 +95,9 @@ def crop_transparent_borders(image, margin=10):
     return cropped
 
 
-def remove_background_removebg(input_path, output_path, api_key=None, crop=True, margin=10):
+def remove_background_removebg(input_path, output_path, api_key=None, crop=True, margin=10, padding=0):
     """
     Remove background using remove.bg API (paid, high quality).
-    
-    Args:
-        input_path: Path to input image
-        output_path: Path to save output PNG
-        api_key: remove.bg API key (or set REMOVEBG_API_KEY env var)
-        crop: Automatically crop transparent borders (default: True)
-        margin: Pixels to leave around subject when cropping (default: 10)
-    
-    Returns:
-        Path to output file
-    
-    Raises:
-        RuntimeError: If API call fails
     """
     input_path = Path(input_path)
     output_path = Path(output_path)
@@ -119,6 +140,10 @@ def remove_background_removebg(input_path, output_path, api_key=None, crop=True,
             if crop:
                 result_img = crop_transparent_borders(result_img, margin)
             
+            # Add padding if requested
+            if padding > 0:
+                result_img = add_transparent_padding(result_img, padding)
+            
             # Save result
             output_path.parent.mkdir(parents=True, exist_ok=True)
             result_img.save(output_path, 'PNG')
@@ -127,7 +152,7 @@ def remove_background_removebg(input_path, output_path, api_key=None, crop=True,
             credits_charged = response.headers.get('X-Credits-Charged', 'unknown')
             credits_remaining = response.headers.get('X-RateLimit-Remaining', 'unknown')
             
-            print(f"  ✓ Background removed successfully")
+            print(f"  {OK} Background removed successfully")
             print(f"    Credits charged: {credits_charged}")
             print(f"    Credits remaining: {credits_remaining}")
             
@@ -156,19 +181,9 @@ def remove_background_removebg(input_path, output_path, api_key=None, crop=True,
         raise RuntimeError(f"Unexpected error: {e}")
 
 
-def remove_background_rembg(input_path, output_path, model="isnet-general-use", crop=True, margin=10):
+def remove_background_rembg(input_path, output_path, model="isnet-general-use", crop=True, margin=10, padding=0):
     """
     Remove background using rembg (free, offline).
-    
-    Args:
-        input_path: Path to input image
-        output_path: Path to save output PNG
-        model: Model to use (u2net, isnet-general-use, u2net_human_seg, silueta)
-        crop: Automatically crop transparent borders (default: True)
-        margin: Pixels to leave around subject when cropping (default: 10)
-    
-    Returns:
-        Path to output file
     """
     try:
         from rembg import remove, new_session
@@ -196,36 +211,33 @@ def remove_background_rembg(input_path, output_path, model="isnet-general-use", 
             if crop:
                 output_img = crop_transparent_borders(output_img, margin)
             
+            # Add padding if requested
+            if padding > 0:
+                output_img = add_transparent_padding(output_img, padding)
+            
             # Save
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_img.save(output_path, 'PNG')
         
-        print(f"  ✓ Background removed")
+        print(f"  {OK} Background removed")
         return output_path
         
     except Exception as e:
         raise RuntimeError(f"rembg failed: {e}")
 
 
-def remove_background(input_path, output_path, method="removebg", crop=True, margin=10, **kwargs):
+def remove_background(input_path, output_path, method="removebg", crop=True, margin=10, padding=0, **kwargs):
     """
-    Remove background using specified method and optionally crop transparent borders.
-    
-    Args:
-        input_path: Path to input image
-        output_path: Path to save output PNG
-        method: "removebg" (paid, high quality) or "rembg" (free)
-        crop: Automatically crop transparent borders (default: True)
-        margin: Pixels to leave around subject when cropping (default: 10)
-        **kwargs: Additional arguments (api_key for removebg, model for rembg)
-    
-    Returns:
-        Path to output file
+    Remove background using specified method and optionally crop/pad.
     """
     if method == "removebg":
-        return remove_background_removebg(input_path, output_path, kwargs.get('api_key'), crop, margin)
+        return remove_background_removebg(
+            input_path, output_path, kwargs.get('api_key'), crop, margin, padding=padding
+        )
     elif method == "rembg":
-        return remove_background_rembg(input_path, output_path, kwargs.get('model', 'isnet-general-use'), crop, margin)
+        return remove_background_rembg(
+            input_path, output_path, kwargs.get('model', 'isnet-general-use'), crop, margin, padding=padding
+        )
     else:
         raise ValueError(f"Unknown method: {method}. Use 'removebg' or 'rembg'")
 
@@ -236,8 +248,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Remove background from images")
     parser.add_argument("--input", required=True, help="Input image path")
     parser.add_argument("--output", required=True, help="Output PNG path")
-    parser.add_argument("--method", choices=["removebg", "rembg"], default="removebg",
-                       help="Method to use (default: removebg)")
+    parser.add_argument("--method", choices=["removebg", "rembg"], default="rembg",
+                       help="Method to use (default: rembg)")
     parser.add_argument("--model", default="isnet-general-use",
                        help="rembg model to use (only for --method rembg)")
     parser.add_argument("--api-key", help="remove.bg API key (or set REMOVEBG_API_KEY env var)")
@@ -245,6 +257,8 @@ if __name__ == "__main__":
                        help="Don't crop transparent borders (keep full size)")
     parser.add_argument("--margin", type=int, default=10,
                        help="Pixels to leave around subject when cropping (default: 10)")
+    parser.add_argument("--padding", type=int, default=0,
+                       help="Add N pixels of transparent padding *after* cropping (default: 0)")
     
     args = parser.parse_args()
     
@@ -255,10 +269,11 @@ if __name__ == "__main__":
             args.method, 
             crop=not args.no_crop,
             margin=args.margin,
+            padding=args.padding,
             api_key=args.api_key, 
             model=args.model
         )
-        print("\n✓ Success!")
+        print("\n{OK} Success!")
     except Exception as e:
-        print(f"\n✗ Error: {e}")
+        print(f"\n{ERR} Error: {e}")
         sys.exit(1)
