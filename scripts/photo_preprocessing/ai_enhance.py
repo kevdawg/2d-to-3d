@@ -405,10 +405,20 @@ def ai_enhance_image(
     print(f"Input: {Path(input_path).name}")
     print(f"Method: {upscale_method} ({upscale_factor}x upscale)\n")
     
-    # Load image
-    img = Image.open(input_path).convert('RGB')
-    original_size = (img.width, img.height)
-    print(f"Original size: {img.width}x{img.height}")
+    # Load image, preserving alpha
+    img_with_alpha = Image.open(input_path)
+    original_size = (img_with_alpha.width, img_with_alpha.height)
+    print(f"Original size: {img_with_alpha.width}x{img_with_alpha.height}")
+
+    if img_with_alpha.mode == 'RGBA':
+        print("   Detected RGBA image, preserving alpha channel.")
+        alpha_channel = img_with_alpha.getchannel('A')
+        img = img_with_alpha.convert('RGB') # Work on RGB channels
+        has_alpha = True
+    else:
+        img = img_with_alpha.convert('RGB')
+        alpha_channel = None
+        has_alpha = False
     
     # Check if image is too large
     max_dimension = max(img.width, img.height)
@@ -449,10 +459,22 @@ def ai_enhance_image(
     print(f"[4/4] Final Sharpening...")
     img = sharpen_image(img, radius=2, strength=sharpen_strength)
     
+    if has_alpha and alpha_channel:
+        print("   Re-applying alpha channel...")
+        # Get the new, upscaled size
+        new_size = (img.width, img.height)
+        
+        # Resize the original alpha channel to match the new size
+        print(f"   Upscaling alpha channel to {new_size}...")
+        alpha_upscaled = alpha_channel.resize(new_size, Image.Resampling.LANCZOS)
+        
+        # Put the alpha channel back
+        img.putalpha(alpha_upscaled)
+
     # Save result
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    img.save(output_path, 'PNG', quality=100)
+    img.save(output_path, 'PNG', quality=100) # This will now save as RGBA
     
     print(f"\n{OK} Enhancement complete!")
     print(f"   Original: {original_size[0]}x{original_size[1]}")

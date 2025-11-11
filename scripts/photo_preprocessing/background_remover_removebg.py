@@ -7,7 +7,7 @@ Includes automatic cropping and optional transparent padding.
 import os
 import sys
 from pathlib import Path
-from PIL import Image
+from PIL import Image, ImageOps
 import requests
 import numpy as np
 
@@ -201,6 +201,7 @@ def remove_background_rembg(input_path, output_path, model="isnet-general-use", 
         
         # Remove background
         with Image.open(input_path) as input_img:
+            input_img = ImageOps.exif_transpose(input_img)
             output_img = remove(input_img, session=session)
             
             # Ensure RGBA

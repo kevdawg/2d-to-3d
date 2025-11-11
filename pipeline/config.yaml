@@ -48,7 +48,7 @@ auto_enhance_preset: "light"                # Options: "none", "light", "balance
 # ----------------------------------------
 remove_background: true
 bg_removal_method: "rembg"  # "removebg" ($0.01/image) or "rembg" (free)
-bg_removal_model: "u2net" #"isnet-general-use"
+bg_removal_model: "isnet-general-use" #"u2net", "isnet-general-use", "u2net_human_seg", "isnet-anime"
 bg_crop_enabled: true
 bg_crop_margin: 10
 mask_depth_map: true

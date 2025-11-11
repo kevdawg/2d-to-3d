@@ -120,7 +120,7 @@ class RegionProcessor:
         """
         cmd = [
             self.conda_exe, "run", "-n", self.marigold_env, "--no-capture-output",
-            "python", str(self.marigold_cli),
+            "python", "-u", str(self.marigold_cli),
             "--input", str(image_path),
             "--output", str(output_path),
             "--steps", str(marigold_settings.get('steps', 20)),

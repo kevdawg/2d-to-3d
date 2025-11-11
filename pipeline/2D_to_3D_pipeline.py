@@ -799,7 +799,7 @@ def run_marigold_cli(image_path: Path, depth_out: Path, marigold_opts: dict, mod
 
     tracker.substep("Initializing depth generation")
     
-    cmd = ["python", str(MARIGOLD_CLI),
+    cmd = ["python", "-u", str(MARIGOLD_CLI),
            "--input", str(image_path),
            "--output", str(depth_out),
            "--checkpoint", str(model_path),  # Use passed path
@@ -977,10 +977,10 @@ def run_extrude_cli(depth_path: Path, stl_out: Path, extrude_params: dict):
     rel_output_path = os.path.relpath(stl_out, script_cwd)
     # --- END FIX ---
 
-    # Use the simple script name and the new relative paths
-    cmd = ["python", EXTRUDE_CLI.name,  # <-- Use simple name
-           "--input", rel_input_path,     # <-- Use relative path
-           "--output", rel_output_path,    # <-- Use relative path
+    # 1. This command is for EXECUTION (relative paths)
+    cmd_for_exec = ["python", EXTRUDE_CLI.name,
+           "--input", rel_input_path,
+           "--output", rel_output_path,
            "--width_mm", str(extrude_params.get("width_mm", 100.0)),
            "--smoothing", str(extrude_params.get("smoothing", 3)),
            "--near_offset", str(extrude_params.get("near_offset", 0.0)),
@@ -993,17 +993,22 @@ def run_extrude_cli(depth_path: Path, stl_out: Path, extrude_params: dict):
            "--scene_lights", str(extrude_params.get("scene_lights", True)),
            "--zip_outputs", str(extrude_params.get("zip_outputs", False))]
 
+    # 2. This command is for LOGGING (absolute paths)
+    cmd_for_log = list(cmd_for_exec)
+    cmd_for_log[1] = str(EXTRUDE_CLI)  # Use absolute script path
+    cmd_for_log[3] = str(depth_path)   # Use absolute input path
+    cmd_for_log[5] = str(stl_out)      # Use absolute output path
+
     # Log command to project file
     if stl_out.parent.exists():
         log_command_to_file(
             stl_out.parent,
             "extrude",
-            cmd, # Log the simple relative-path command
+            cmd_for_log, # <-- Use the absolute log command
             f"Convert depth map to 3D model"
         )
-
-    # Get the full conda-wrapped command
-    full = conda_prefix_cmd(DEPTH_ENV, cmd)
+    
+    full = conda_prefix_cmd(DEPTH_ENV, cmd_for_exec)
     
     print(f"\nConverting depth map to 3D model...")
     print(f"   (Executing in: {script_cwd})") # Debug message
@@ -1506,23 +1511,30 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
                 rel_input_path = os.path.relpath(working_image, script_cwd)
                 rel_output_path = os.path.relpath(enhanced_path, script_cwd)
 
-                cmd = [
+                # 1. This command is for EXECUTION (relative paths)
+                cmd_for_exec = [
                     "python", ai_enhance_cli.name,
                     "--input", rel_input_path,
                     "--output", rel_output_path,
-                    "--upscale", str(upscale_factor),
+                    "--upscale", str(ai_config.get('upscale_factor', 'realesrgan')),
                     "--method", ai_config.get('upscale_method', 'realesrgan'),
                     "--max-size", str(ai_config.get('max_input_size', 2048)),
                     "--clarity", str(ai_config.get('clarity_strength', 1.3)),
                     "--detail", str(ai_config.get('detail_amount', 1.2)),
                     "--sharpen", str(ai_config.get('sharpen_strength', 150))
                 ]
+                
+                # 2. This command is for LOGGING (absolute paths)
+                cmd_for_log = list(cmd_for_exec)
+                cmd_for_log[1] = str(ai_enhance_cli)  # Use absolute script path
+                cmd_for_log[3] = str(working_image)   # Use absolute input path
+                cmd_for_log[5] = str(enhanced_path)   # Use absolute output path
 
                 log_command_to_file(
-                    output_dir, "ai_enhance", cmd, "AI upscale and enhance image"
+                    output_dir, "ai_enhance", cmd_for_log, "AI upscale and enhance image"
                 )
                 
-                full_cmd = conda_prefix_cmd(PHOTO_PREP_ENV, cmd)
+                full_cmd = conda_prefix_cmd(PHOTO_PREP_ENV, cmd_for_exec)
                 tracker.substep("Running AI enhancement pipeline")
                 
                 try:
@@ -1645,21 +1657,28 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
                 rel_input_path = os.path.relpath(stl_raw_path, script_cwd)
                 rel_output_path = os.path.relpath(stl_no_walls_path, script_cwd)
 
-                cmd = [
+                # 1. This command is for EXECUTION (relative paths)
+                cmd_for_exec = [
                     "python", remove_walls_cli.name,
                     "--input", rel_input_path,
                     "--output", rel_output_path,
                     "--frame-thickness", "0.0"
                 ]
 
+                # 2. This command is for LOGGING (absolute paths)
+                cmd_for_log = list(cmd_for_exec)
+                cmd_for_log[1] = str(remove_walls_cli)   # Use absolute script path
+                cmd_for_log[3] = str(stl_raw_path)     # Use absolute input path
+                cmd_for_log[5] = str(stl_no_walls_path)  # Use absolute output path
+
                 log_command_to_file(
                     output_dir,
                     "remove_walls",
-                    cmd,
+                    cmd_for_log, # <-- Use the absolute log command
                     "Remove 0-thickness walls and add solid bottom"
                 )
 
-                full_cmd = conda_prefix_cmd(DEPTH_ENV, cmd)
+                full_cmd = conda_prefix_cmd(DEPTH_ENV, cmd_for_exec)
                 
                 try:
                     rc, output = run_cmd(full_cmd, cwd=script_cwd, clean_env=True)
