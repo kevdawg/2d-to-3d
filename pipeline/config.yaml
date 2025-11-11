@@ -133,8 +133,8 @@ extrude_defaults:
   width_mm: 100.0
   max_height_mm: null
   smoothing: 3
-  near_offset: 0.0
-  far_offset: 1
+  near_offset: "auto" # 0 is the top and auto will detect the best location
+  far_offset: "auto" # 1 is the back and auto will detect the best location
   emboss: 0.2
   f_thic: 0.0
   f_near: -0.0

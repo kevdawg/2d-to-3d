@@ -18,6 +18,7 @@ import argparse
 import yaml
 import platform
 from PIL import Image
+import numpy as np  # <-- ADDED IMPORT
 
 # Add timing tracker
 HERE = Path(__file__).resolve().parent
@@ -799,7 +800,7 @@ def run_marigold_cli(image_path: Path, depth_out: Path, marigold_opts: dict, mod
 
     tracker.substep("Initializing depth generation")
     
-    cmd = ["python", "-u", str(MARIGOLD_CLI),
+    cmd = ["python", "-u", str(MARIGOLD_CLI), # <-- Added -u for unbuffered output
            "--input", str(image_path),
            "--output", str(depth_out),
            "--checkpoint", str(model_path),  # Use passed path
@@ -986,7 +987,7 @@ def run_extrude_cli(depth_path: Path, stl_out: Path, extrude_params: dict):
            "--near_offset", str(extrude_params.get("near_offset", 0.0)),
            "--far_offset", str(extrude_params.get("far_offset", 1.0)),
            "--emboss", str(extrude_params.get("emboss", 0.3)),
-           "--f_thic", str(extrude_params.get("f_thic", 0.00)),
+           "--f_thic", str(extrude_params.get("f_thic", 0.0)),
            "--f_near", str(extrude_params.get("f_near", -0.0)),
            "--f_back", str(extrude_params.get("f_back", 0.01)),
            "--vertex_colors", str(extrude_params.get("vertex_colors", True)),
@@ -1008,7 +1009,8 @@ def run_extrude_cli(depth_path: Path, stl_out: Path, extrude_params: dict):
             f"Convert depth map to 3D model"
         )
     
-    full = conda_prefix_cmd(DEPTH_ENV, cmd_for_exec)
+    # Get the full conda-wrapped command for execution
+    full = conda_prefix_cmd(DEPTH_ENV, cmd_for_exec) # <-- Use the execution command
     
     print(f"\nConverting depth map to 3D model...")
     print(f"   (Executing in: {script_cwd})") # Debug message
@@ -1020,6 +1022,47 @@ def run_extrude_cli(depth_path: Path, stl_out: Path, extrude_params: dict):
         last_lines = "\n".join(output.splitlines()[-5:])
         raise RuntimeError(f"3D extrusion failed.\n\nLast output from script:\n{last_lines}")
     return stl_out
+
+
+def analyze_depth_map(depth_path: Path, tracker: TimingTracker):
+    """
+    Analyzes a 16-bit depth map to find the actual min/max values
+    of the subject, ignoring the pure white (65535) background.
+    
+    Returns:
+        (auto_near, auto_far) as normalized floats (0.0 - 1.0)
+    """
+    tracker.substep("Analyzing depth map for auto-offsets...")
+    try:
+        img = Image.open(depth_path)
+        depth_array = np.array(img).astype(np.uint16)
+        
+        # The background is 65535 (pure white).
+        # We need the min and max of the *subject*.
+        #subject_pixels = depth_array[depth_array < 65535]
+        subject_pixels = depth_array[depth_array < 59000]
+        
+        if subject_pixels.size == 0:
+            tracker.substep(f"{WARN} No subject pixels found (image is all white?). Using defaults.")
+            return 0.0, 1.0
+            
+        subject_min = np.min(subject_pixels)
+        subject_max = np.max(subject_pixels)
+        
+        # Normalize from 0-65535 range to 0.0-1.0 range
+        auto_near = subject_min / 65535.0
+        auto_far = subject_max / 65535.0
+        
+        # Add a tiny bit of padding to avoid clipping
+        auto_near = max(0.0, auto_near - 0.01)
+        auto_far = min(1.0, auto_far + 0.01)
+        
+        tracker.substep(f"Auto-offsets calculated: near={auto_near:.3f}, far={auto_far:.3f}")
+        return auto_near, auto_far
+        
+    except Exception as e:
+        tracker.substep(f"{ERR} Failed to analyze depth map: {e}")
+        return 0.0, 1.0
 
 
 def view_edit_defaults():
@@ -1516,7 +1559,7 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
                     "python", ai_enhance_cli.name,
                     "--input", rel_input_path,
                     "--output", rel_output_path,
-                    "--upscale", str(ai_config.get('upscale_factor', 'realesrgan')),
+                    "--upscale", str(upscale_factor),
                     "--method", ai_config.get('upscale_method', 'realesrgan'),
                     "--max-size", str(ai_config.get('max_input_size', 2048)),
                     "--clarity", str(ai_config.get('clarity_strength', 1.3)),
@@ -1534,7 +1577,7 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
                     output_dir, "ai_enhance", cmd_for_log, "AI upscale and enhance image"
                 )
                 
-                full_cmd = conda_prefix_cmd(PHOTO_PREP_ENV, cmd_for_exec)
+                full_cmd = conda_prefix_cmd(PHOTO_PREP_ENV, cmd_for_exec) # <-- Use exec command
                 tracker.substep("Running AI enhancement pipeline")
                 
                 try:
@@ -1593,8 +1636,8 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
                 marigold_input = prepared_path
 
         # STEP 5: Generate depth map
+        depth_path = output_dir / f"{project_name}_depth_16bit.png" # Define here
         with tracker.step(step_num, "Depth Map Generation"):
-            depth_path = output_dir / f"{project_name}_depth_16bit.png"
             marigold_opts = MARIGOLD_PRESETS[quality_preset]
             
             tracker.substep("Initializing Marigold pipeline")
@@ -1629,6 +1672,23 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
                     print(f"  {WARN} Could not mask depth map: {e}")
         step_num += 1
         
+        # Get a mutable copy of the extrusion settings
+        extrude_settings = EXTRUDE_DEFAULTS.copy()
+        
+        # Check if auto-calculation is needed
+        auto_near_val = extrude_settings.get("near_offset")
+        auto_far_val = extrude_settings.get("far_offset")
+
+        if auto_near_val == "auto" or auto_far_val == "auto":
+            auto_near_offset, auto_far_offset = analyze_depth_map(depth_path, tracker)
+            
+            if auto_near_val == "auto":
+                extrude_settings["near_offset"] = auto_near_offset
+                tracker.substep(f"Auto near_offset set to {auto_near_offset:.3f}")
+            if auto_far_val == "auto":
+                extrude_settings["far_offset"] = auto_far_offset
+                tracker.substep(f"Auto far_offset set to {auto_far_offset:.3f}")
+
         # STEP 6: Extrude to 3D model
         with tracker.step(step_num, "3D Model Creation"):
             stl_raw_path = output_dir / f"{project_name}_raw.stl"
@@ -1639,7 +1699,7 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
             stl_for_repair = stl_raw_path
             
             # run_extrude_cli already does logging, so we just call it
-            run_extrude_cli(depth_path, stl_raw_path, EXTRUDE_DEFAULTS)
+            run_extrude_cli(depth_path, stl_raw_path, extrude_settings) # <-- Pass the modified settings
             tracker.substep("3D models created", "STL, GLB, OBJ")
         step_num += 1
         
@@ -1678,7 +1738,7 @@ def process_single_image(image_path, quality_preset, auto_enhance=False):
                     "Remove 0-thickness walls and add solid bottom"
                 )
 
-                full_cmd = conda_prefix_cmd(DEPTH_ENV, cmd_for_exec)
+                full_cmd = conda_prefix_cmd(DEPTH_ENV, cmd_for_exec) # <-- Use the execution command
                 
                 try:
                     rc, output = run_cmd(full_cmd, cwd=script_cwd, clean_env=True)
@@ -1815,9 +1875,28 @@ def reprocess_depth_map(depth_path):
     source_candidates = list(output_dir.glob("source.*"))
     source_image = source_candidates[0] if source_candidates else None
     
+    # --- NEW: Auto-calculate offsets for reprocessing ---
+    extrude_settings = EXTRUDE_DEFAULTS.copy()
+    auto_near_val = extrude_settings.get("near_offset")
+    auto_far_val = extrude_settings.get("far_offset")
+
+    # Need a temporary tracker for the analysis function
+    temp_tracker = TimingTracker(total_steps=1)
+    
+    if auto_near_val == "auto" or auto_far_val == "auto":
+        auto_near_offset, auto_far_offset = analyze_depth_map(depth_path, temp_tracker)
+        
+        if auto_near_val == "auto":
+            extrude_settings["near_offset"] = auto_near_offset
+            print(f"  {INFO} Auto near_offset set to {auto_near_offset:.3f}")
+        if auto_far_val == "auto":
+            extrude_settings["far_offset"] = auto_far_offset
+            print(f"  {INFO} Auto far_offset set to {auto_far_offset:.3f}")
+    # --- END NEW SECTION ---
+
     # Extrude
     stl_raw_path = output_dir / f"{project_name}_raw_v2.stl"
-    run_extrude_cli(depth_path, stl_raw_path, EXTRUDE_DEFAULTS)
+    run_extrude_cli(depth_path, stl_raw_path, extrude_settings) 
     
     # Post-process if enabled
     if cfg.get("enable_advanced_postprocessing", False):
@@ -1936,9 +2015,13 @@ def edit_configuration():
     input("\nPress Enter when done editing...")
     
     # Reload config
-    global cfg
+    global cfg, EXTRUDE_DEFAULTS, MARIGOLD_PRESETS
     with open(CONFIG_PATH, 'r') as f:
         cfg = yaml.safe_load(f)
+    
+    # Update global configs
+    EXTRUDE_DEFAULTS = cfg.get("extrude_defaults", {})
+    MARIGOLD_PRESETS = cfg.get("marigold_presets", {})
     
     print(f"{OK} Configuration reloaded.")
 
