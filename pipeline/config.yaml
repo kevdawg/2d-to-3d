@@ -12,16 +12,24 @@ depth_env: "depth-to-3d"          # For 3D extrusion
 photo_prep_env: "photo-prep"      # For photo enhancement (if needed)
 use_conda: true
 
+# ----------------------------------------
+# Google Cloud Configuration
+# ----------------------------------------
+# Google Cloud Project (REQUIRED for Imagen 3 / AI Repair)
+google_cloud_project: "gen-lang-client-0248735054" #"gen-lang-client-0248735054"
+
 
 # ----------------------------------------
 # File Paths (relative to pipeline folder)
 # ----------------------------------------
 marigold_cli: "../scripts/depth_generation/marigold_cli.py"
 extrude_cli: "../scripts/model_generation/extrude_cli.py"
+ai_repair_cli: "../scripts/image_generation/enhance_with_ai_prompt.py"
 models:
   marigold: "models/marigold_model"
   realesrgan: "models/RealESRGAN"
   rembg: "models/rembg_models"
+  GFPGAN: "models/GFPGAN"
 
 # Folder Structure
 dir_ai_generated: "../data/AI_files"      # AI-generated images
@@ -133,8 +141,8 @@ extrude_defaults:
   width_mm: 100.0
   max_height_mm: null
   smoothing: 3
-  near_offset: "auto" # 0 is the top and auto will detect the best location
-  far_offset: "auto" # 1 is the back and auto will detect the best location
+  near_offset: 0 # 0 is the top and auto will detect the best location
+  far_offset: 1 # 1 is the back and auto will detect the best location
   emboss: 0.2
   f_thic: 0.0
   f_near: -0.0
@@ -264,13 +272,13 @@ ai_enhancement:
   enabled: true  # Set to false to skip AI enhancement
   
   # Upscaling method
-  #upscale_method: "realesrgan"  # Great general purpose
+  upscale_method: "realesrgan"  # Great general purpose
   upscale_method: "lanczos"  # Fast!
   #upscale_method: "waifu2x"  # Great for anime characters
   #upscale_method: "gfpgan"  # Specialized for faces
   
   upscale_factor: 4  # Options: 2, 4, or 8 (higher = slower, more detail)
-  max_input_size: 2048  # Max dimension before auto-switching to LANCZOS (prevents OOM)
+  max_input_size: 4096  # Max dimension before auto-switching to LANCZOS (prevents OOM)
   
   # Enhancement parameters
   clarity_strength: 1.3  # 0.5-2.0 (edge-preserving smoothing)

@@ -21,6 +21,7 @@ from pathlib import Path
 import argparse
 import platform
 import os
+import urllib.request # <-- ADDED for manual downloads
 
 OK = "[OK]"
 ERR = "[X]"
@@ -75,17 +76,33 @@ def lazy_import(module_name, package_name=None):
         return None
 
 
+def get_model_cache_dir(model_cache_dir=None, sub_dir=""):
+    """Helper to get and create the model cache directory."""
+    if model_cache_dir is None:
+        model_cache_dir = Path(__file__).parent.parent.parent / "models"
+    
+    cache_path = Path(model_cache_dir) / sub_dir
+    cache_path.mkdir(parents=True, exist_ok=True)
+    return cache_path
+
+
+def download_model_if_missing(model_path: Path, url: str, model_name: str):
+    """Downloads a model file if it doesn't exist."""
+    if not model_path.exists():
+        print(f"  Downloading {model_name} model...")
+        try:
+            urllib.request.urlretrieve(url, str(model_path))
+            print(f"  {OK} Model cached: {model_path.name}")
+        except Exception as e:
+            print(f"  {ERR} Failed to download {model_name}: {e}")
+            raise RuntimeError(f"Could not download {model_name}")
+    else:
+        print(f"  Using cached model: {model_path.name}")
+
+
 def upscale_realesrgan(img, scale=4, model_cache_dir=None):
     """
     Upscale image using Real-ESRGAN AI model.
-    
-    Args:
-        img: PIL Image object
-        scale: Upscaling factor (2 or 4)
-        model_cache_dir: Directory to cache models
-    
-    Returns:
-        Upscaled PIL Image
     """
     try:
         from realesrgan import RealESRGANer
@@ -95,80 +112,42 @@ def upscale_realesrgan(img, scale=4, model_cache_dir=None):
         
         print(f"Upscaling {scale}x with Real-ESRGAN (AI model)...")
         
-        # Determine model based on scale
         if scale == 4:
             model_name = 'RealESRGAN_x4plus'
             netscale = 4
-        else:  # scale == 2 or 1 (treat 1 as 2)
+            model_url = 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth'
+        else:
             model_name = 'RealESRGAN_x2plus'
             netscale = 2
+            model_url = 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth'
             if scale == 1:
-                scale = 2  # Real-ESRGAN minimum is 2x
+                scale = 2
         
-        # Set model cache directory
-        if model_cache_dir is None:
-            model_cache_dir = Path(__file__).parent.parent.parent / "models" / "RealESRGAN"
+        cache_dir = get_model_cache_dir(model_cache_dir, "RealESRGAN")
+        model_path = cache_dir / f"{model_name}.pth"
+        download_model_if_missing(model_path, model_url, model_name)
         
-        model_cache_dir = Path(model_cache_dir)
-        model_cache_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Model URLs
-        model_urls = {
-            'RealESRGAN_x2plus': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth',
-            'RealESRGAN_x4plus': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth'
-        }
-        
-        # Check if model exists locally
-        model_path = model_cache_dir / f"{model_name}.pth"
-        
-        if not model_path.exists():
-            print(f"  Downloading {model_name} model...")
-            import urllib.request
-            urllib.request.urlretrieve(model_urls[model_name], str(model_path))
-            print(f"  {OK} Model cached")
-        else:
-            print(f"  Using cached model: {model_path.name}")
-        
-        # Create model architecture
         model = RRDBNet(
-            num_in_ch=3,
-            num_out_ch=3,
-            num_feat=64,
-            num_block=23,
-            num_grow_ch=32,
-            scale=netscale
+            num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=netscale
         )
         
-        # Detect device
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        # Initialize upsampler
         upsampler = RealESRGANer(
             scale=netscale,
             model_path=str(model_path),
             model=model,
-            tile=0,
-            tile_pad=10,
-            pre_pad=0,
-            half=False,
+            tile=0, tile_pad=10, pre_pad=0, half=False,
             device=device
         )
         
-        # Convert PIL to numpy array (BGR for OpenCV)
         img_array = np.array(img)
         img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
         
-        # Upscale
         output_bgr, _ = upsampler.enhance(img_bgr, outscale=scale)
-        
-        # Convert back to RGB
         output_rgb = cv2.cvtColor(output_bgr, cv2.COLOR_BGR2RGB)
         
-        # Convert to PIL Image
-        output_img = Image.fromarray(output_rgb)
-        
-        print(f"  {OK} Upscaled to: {output_img.width}x{output_img.height}")
-        return output_img
+        return Image.fromarray(output_rgb)
         
     except Exception as e:
         print(f"  {ERR} Real-ESRGAN failed: {e}")
@@ -179,13 +158,7 @@ def upscale_realesrgan(img, scale=4, model_cache_dir=None):
 def upscale_lanczos(img, scale=4):
     """
     Upscale using LANCZOS (Pillow's high-quality resampling).
-    Fast! - No AI dependencies, works on any hardware.
-    
-    Performance: Very fast (~2-5 seconds for any size)
-    Memory: Low (~2x input size)
-    Quality: Good, but not as detailed as AI methods
     """
-
     if scale == 1:
         print(f"Upscaling 1x with Pillow (Lanczos)...")
         return img  # No upscaling needed
@@ -198,31 +171,18 @@ def upscale_lanczos(img, scale=4):
 def upscale_waifu2x(img, scale=4):
     """
     Upscale using Waifu2x (specialized for anime/illustrations).
-    Great for anime characters - Trained on anime/manga, NOT suitable for photos.
-    
-    Performance: Fast to moderate
-    Memory: Moderate
-    Use Case: Only use for anime-style images, illustrations, or line art
     """
     print(f"Upscaling {scale}x with Waifu2x (anime model)...")
     
-    # Lazy import waifu2x
-    # Note: This requires waifu2x-ncnn-vulkan-python
     try:
         waifu2x = lazy_import('waifu2x_ncnn_vulkan_python', 'waifu2x-ncnn-vulkan')
         if waifu2x is None:
-            print("  {ERR} Waifu2x unavailable, falling back to LANCZOS")
-            return upscale_lanczos(img, scale)
+            raise ImportError("Waifu2x not installed")
         
         from waifu2x_ncnn_vulkan_python import Waifu2x
         
-        # Initialize model
         upscaler = Waifu2x(gpuid=0, scale=scale, noise=0)
-        
-        # Convert PIL to numpy
         img_np = np.array(img)
-        
-        # Upscale
         output = upscaler.process(img_np)
         
         return Image.fromarray(output)
@@ -233,19 +193,12 @@ def upscale_waifu2x(img, scale=4):
         return upscale_lanczos(img, scale)
 
 
-def upscale_gfpgan(img, scale=4):
+def upscale_gfpgan(img, scale=4, model_cache_dir=None):
     """
     Upscale using GFPGAN (specialized for face restoration).
-    Specialized for faces - Best for portraits and close-up faces.
-    
-    Performance: Moderate on GPU, slow on CPU
-    Memory: Moderate to high
-    Use Case: ONLY use for images with prominent faces
-    Note: Also does face restoration (fixes blur, artifacts)
     """
     print(f"Upscaling {scale}x with GFPGAN (face restoration)...")
     
-    # Lazy import GFPGAN
     gfpgan = lazy_import('gfpgan', 'gfpgan')
     if gfpgan is None:
         print(f"  {ERR} GFPGAN unavailable, falling back to LANCZOS")
@@ -254,16 +207,25 @@ def upscale_gfpgan(img, scale=4):
     try:
         from gfpgan import GFPGANer
         
+        # --- START FIX ---
+        # Explicitly download and provide the model path
+        model_name = 'GFPGANv1.4'
+        model_url = 'https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.4.pth'
+        
+        cache_dir = get_model_cache_dir(model_cache_dir, "GFPGAN")
+        model_path = cache_dir / f"{model_name}.pth"
+        download_model_if_missing(model_path, model_url, model_name)
+
         # Initialize model
         restorer = GFPGANer(
-            model_path=None,  # Will download automatically
+            model_path=str(model_path),  # <-- PASS THE EXPLICIT PATH
             upscale=scale,
             arch='clean',
             channel_multiplier=2,
-            bg_upsampler=None  # Don't upscale background separately
+            bg_upsampler=None
         )
+        # --- END FIX ---
         
-        # Convert PIL to numpy
         img_np = np.array(img)
         
         # Enhance
@@ -280,41 +242,28 @@ def upscale_gfpgan(img, scale=4):
 def enhance_clarity(img, strength=1.3):
     """
     Enhance clarity using guided filter (edge-preserving smoothing + sharpening).
-    Reduces small noise while enhancing edges.
-    
-    Args:
-        strength: 0.5-2.0 (higher = more aggressive)
     """
     print(f"  Enhancing clarity (strength={strength})...")
     
-    # Lazy import opencv
     cv2 = lazy_import('cv2', 'opencv-python')
     if cv2 is None:
         print("  {ERR} OpenCV unavailable, skipping clarity enhancement")
         return img
     
-    # Convert to numpy
     img_array = np.array(img)
     img_float = img_array.astype(np.float32) / 255.0
     
-    # Apply guided filter (edge-preserving smooth)
     try:
         smoothed = cv2.ximgproc.guidedFilter(
-            guide=img_float,
-            src=img_float,
-            radius=4,
-            eps=0.01
+            guide=img_float, src=img_float, radius=4, eps=0.01
         )
     except AttributeError:
-        # opencv-contrib not installed, use bilateral filter instead
         img_uint8 = img_array.astype(np.uint8)
         smoothed = cv2.bilateralFilter(img_uint8, 5, 50, 50).astype(np.float32) / 255.0
     
-    # Enhance by adding back high-frequency details
     details = img_float - smoothed
     enhanced = img_float + details * strength
     
-    # Clip and convert back
     enhanced = np.clip(enhanced * 255, 0, 255).astype(np.uint8)
     return Image.fromarray(enhanced)
 
@@ -322,14 +271,9 @@ def enhance_clarity(img, strength=1.3):
 def enhance_details(img, amount=1.2):
     """
     Enhance fine details using Laplacian pyramid.
-    Brings out texture without amplifying noise.
-    
-    Args:
-        amount: 0.5-3.0 (higher = more detail)
     """
     print(f"  Enhancing details (amount={amount})...")
     
-    # Lazy import opencv
     cv2 = lazy_import('cv2', 'opencv-python')
     if cv2 is None:
         print(f"  {ERR} OpenCV unavailable, skipping detail enhancement")
@@ -337,19 +281,16 @@ def enhance_details(img, amount=1.2):
     
     img_array = np.array(img).astype(np.float32)
     
-    # Create Gaussian pyramid
     gaussian = [img_array]
     for _ in range(3):
         gaussian.append(cv2.pyrDown(gaussian[-1]))
     
-    # Create Laplacian pyramid
     laplacian = []
     for i in range(len(gaussian) - 1):
         size = (gaussian[i].shape[1], gaussian[i].shape[0])
         lap = gaussian[i] - cv2.pyrUp(gaussian[i + 1], dstsize=size)
         laplacian.append(lap * amount)
     
-    # Reconstruct with enhanced details
     reconstructed = gaussian[-1]
     for i in range(len(laplacian) - 1, -1, -1):
         size = (laplacian[i].shape[1], laplacian[i].shape[0])
@@ -362,10 +303,6 @@ def enhance_details(img, amount=1.2):
 def sharpen_image(img, radius=2, strength=150):
     """
     Final sharpening pass using unsharp mask.
-    
-    Args:
-        radius: 1-5 (blur radius)
-        strength: 50-300 (sharpening percentage)
     """
     print(f"  Sharpening with UnsharpMask (radius={radius}, strength={strength}%)...")
     return img.filter(ImageFilter.UnsharpMask(radius=radius, percent=strength, threshold=3))
@@ -386,20 +323,6 @@ def ai_enhance_image(
 
     """
     Complete AI enhancement pipeline.
-    
-    Args:
-        input_path: Path to input image
-        output_path: Path to save enhanced image
-        upscale_factor: 2, 4, or 8
-        upscale_method: "realesrgan", "lanczos", "waifu2x", "gfpgan"
-        max_input_size: Max dimension before forcing LANCZOS fallback
-        clarity_strength: 0.5-2.0
-        detail_amount: 0.5-3.0
-        sharpen_strength: 50-300
-        auto_fallback: If True, use LANCZOS for oversized images
-    
-    Returns:
-        Path to output file
     """
     print(f"\nAI Enhancement Pipeline")
     print(f"Input: {Path(input_path).name}")
@@ -432,7 +355,7 @@ def ai_enhance_image(
    # Step 1: Upscale
     print(f"[1/4] Upscaling {upscale_factor}x...")
 
-    # Call upscale function with model cache dir if Real-ESRGAN
+    # Pass model cache dir to all upscalers
     if upscale_method.lower() == "realesrgan":
         img = upscale_realesrgan(img, upscale_factor, model_cache_dir)
     elif upscale_method.lower() == "lanczos":
@@ -440,7 +363,7 @@ def ai_enhance_image(
     elif upscale_method.lower() == "waifu2x":
         img = upscale_waifu2x(img, upscale_factor)
     elif upscale_method.lower() == "gfpgan":
-        img = upscale_gfpgan(img, upscale_factor)
+        img = upscale_gfpgan(img, upscale_factor, model_cache_dir)
     else:
         # Default to Real-ESRGAN
         img = upscale_realesrgan(img, upscale_factor, model_cache_dir)
@@ -459,6 +382,7 @@ def ai_enhance_image(
     print(f"[4/4] Final Sharpening...")
     img = sharpen_image(img, radius=2, strength=sharpen_strength)
     
+    # --- NEW SECTION: Re-apply Alpha ---
     if has_alpha and alpha_channel:
         print("   Re-applying alpha channel...")
         # Get the new, upscaled size
@@ -470,6 +394,7 @@ def ai_enhance_image(
         
         # Put the alpha channel back
         img.putalpha(alpha_upscaled)
+    # --- END NEW SECTION ---
 
     # Save result
     output_path = Path(output_path)
@@ -509,8 +434,9 @@ Examples:
     
     parser.add_argument("--input", required=True, help="Input image path")
     parser.add_argument("--output", required=True, help="Output image path")
-    parser.add_argument("--upscale", type=int, default=4, choices=[1, 2, 4, 8],
-                       help="Upscale factor (default: 4)")
+    parser.add_argument("--upscale", type=int, default=1, # CHANGED DEFAULT TO 1
+                       choices=[1, 2, 4, 8],
+                       help="Upscale factor (default: 1)")
     parser.add_argument("--method", default="realesrgan",
                        choices=["realesrgan", "lanczos", "waifu2x", "gfpgan"],
                        help="Upscaling method (default: realesrgan)")
@@ -525,6 +451,20 @@ Examples:
     parser.add_argument("--no-fallback", action='store_true',
                        help="Disable automatic LANCZOS fallback for large images")
     
+    # --- NEW: Get model cache dir from config ---
+    # This is a bit of a hack for the CLI, but makes it consistent
+    try:
+        with open(Path(__file__).parent.parent.parent / "pipeline" / "config.yaml", "r") as f:
+            cli_cfg = yaml.safe_load(f)
+            models_cfg = cli_cfg.get("models", {})
+            DEFAULT_CACHE_DIR = Path(__file__).parent.parent.parent / models_cfg.get("marigold", "models/marigold_model")
+            DEFAULT_CACHE_DIR = DEFAULT_CACHE_DIR.parent # Get the main 'models' folder
+    except Exception:
+        DEFAULT_CACHE_DIR = Path(__file__).parent.parent.parent / "models"
+
+    parser.add_argument("--model-cache-dir", default=str(DEFAULT_CACHE_DIR),
+                       help="Directory to cache downloaded models")
+    
     args = parser.parse_args()
     
     try:
@@ -537,7 +477,8 @@ Examples:
             clarity_strength=args.clarity,
             detail_amount=args.detail,
             sharpen_strength=args.sharpen,
-            auto_fallback=not args.no_fallback
+            auto_fallback=not args.no_fallback,
+            model_cache_dir=args.model_cache_dir
         )
     except Exception as e:
         print(f"\n{ERR} Error: {e}")

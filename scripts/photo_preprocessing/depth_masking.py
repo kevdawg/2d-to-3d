@@ -11,7 +11,8 @@ from pathlib import Path
 def mask_depth_with_alpha(depth_path, alpha_source_path, output_path=None):
     """
     Apply alpha mask from source image to depth map.
-    Sets background pixels to 65535 (white = far distance) in depth map.
+    Sets background pixels to the subject's lowest point (whitest pixel)
+    to create a solid bas-relief instead of a "pillar".
     
     Args:
         depth_path: Path to depth map (grayscale 16-bit PNG)
@@ -55,9 +56,24 @@ def mask_depth_with_alpha(depth_path, alpha_source_path, output_path=None):
     # Create mask (threshold at 10 to keep semi-transparent pixels)
     mask = alpha > 10
     
-    # Apply mask - set background to 65535 (white = far distance)
+    # --- UPDATED LOGIC ---
+    # Find the "lowest" part of the subject (its whitest pixel / max value)
+    subject_pixels = depth_array[mask]
+    
+    fill_desc = ""
+    if subject_pixels.size > 0:
+        # Set the background to be level with the lowest part of the subject
+        fill_value = np.max(subject_pixels)
+        fill_desc = f"subject's lowest point ({fill_value})"
+    else:
+        # Fallback if mask is empty for some reason
+        fill_value = 65535 
+        fill_desc = "far distance (default)"
+    
+    # Apply mask - set background to the subject's max value
     masked_depth = depth_array.copy()
-    masked_depth[~mask] = 65535  # Changed from 0 to 65535
+    masked_depth[~mask] = fill_value
+    # --- END UPDATED LOGIC ---
     
     # Calculate stats
     bg_pixels = np.sum(~mask)
@@ -67,7 +83,7 @@ def mask_depth_with_alpha(depth_path, alpha_source_path, output_path=None):
     result_img = Image.fromarray(masked_depth.astype(np.uint16))
     result_img.save(output_path, format='PNG', bits=16)
     
-    print(f"  Masked depth: {bg_percent:.1f}% background set to far distance")
+    print(f"  Masked depth: {bg_percent:.1f}% background set to {fill_desc}")
     return output_path
 
 
@@ -133,6 +149,7 @@ def batch_mask_depths(depth_dir, alpha_source_dir, output_dir=None):
 
 if __name__ == "__main__":
     import argparse
+    import sys
     
     parser = argparse.ArgumentParser(description="Mask depth maps with alpha channels")
     parser.add_argument("--depth", required=True, help="Depth map file or directory")

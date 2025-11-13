@@ -2,7 +2,14 @@
 # Purpose: AI image generation (Gemini Flash and Imagen 3)
 # Python: 3.10+
 
+
+#For Imagen 3 and Vertex AI (paid)
 google-cloud-aiplatform>=1.38.0
 google-auth>=2.23.0
+
+# For Gemini (free tier)
+google-genai>=1.0.0
+
+#Common
 pillow>=10.0.0
 requests>=2.31.0
