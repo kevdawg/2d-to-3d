@@ -128,12 +128,10 @@ def run_cmd(cmd_list, show_timer=False, timer_message="Processing", cwd=None, cl
             'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 
             
             # Home variables
-            'USERPROFILE', 'HOME', 'HOMEDRIVE', 'HOMEPATH',
+            'USERPROFILE', 'HOME', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA',
 
-            # --- THIS IS THE FIX ---
             # We MUST preserve the Google Auth variable
             'GOOGLE_APPLICATION_CREDENTIALS',
-            # --- END FIX ---
             
             # Conda variables (CRITICAL for conda.bat to function)
             'CONDA_EXE', 'CONDA_ROOT', 'CONDA_SHLVL', 'CONDA_BAT',

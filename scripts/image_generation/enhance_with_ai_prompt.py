@@ -20,8 +20,7 @@ warnings.filterwarnings('ignore', category=UserWarning)
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 try:
-    # --- FIX: Correct import path ---
-    # We are no longer using '.preview'
+    # --- FIX: We only need these two classes ---
     from vertexai.vision_models import ImageGenerationModel, Image
     # --- END FIX ---
     
@@ -43,9 +42,8 @@ def ai_repair_image(input_path: str, output_path: str, prompt_list: list, projec
     """
     location = os.environ.get("GOOGLE_CLOUD_REGION", "us-central1")
     
-    # --- FIX: Join the list of words back into a single string ---
+    # --- Join the list of words back into a single string ---
     prompt_text = " ".join(prompt_list)
-    # --- END FIX ---
     
     print(f"AI Repair Initialized...")
     print(f"  Project: {project_id}, Region: {location}")
@@ -63,20 +61,20 @@ def ai_repair_image(input_path: str, output_path: str, prompt_list: list, projec
         
         print("  Sending image and prompt to AI for repair...")
         
-        # "Leash" the AI. 0.0 = 100% original, 1.0 = 100% prompt.
-        # 0.4 (40% prompt influence) is a good starting point for repair.
-        prompt_strength_value = 0.4
-        print(f"  Repair strength set to: {prompt_strength_value}")
+        guidance_scale_value = 0.1 
+        print(f"  Guidance scale set to: {guidance_scale_value}")
         
-        # Generate the image
+        # Generate the image by passing all arguments directly
+        # as keywords, matching the signature we found.
         images = model.edit_image(
-            base_image=input_image,  # <-- FIX: Use 'base_image'
+            base_image=input_image,
             prompt=prompt_text,
-            prompt_strength=prompt_strength_value, # <-- FIX: "Different Dog"
+            guidance_scale=guidance_scale_value, # <-- Use the correct parameter
             number_of_images=1,
             safety_filter_level="block_some",
             person_generation="allow_adult",
         )
+        # --- END FIX ---
         
         if images and len(images.images) > 0:
             image = images.images[0]
@@ -100,10 +98,9 @@ def main():
     parser.add_argument("--input", required=True, help="Path to the blurry/input image")
     parser.add_argument("--output", required=True, help="Output path for the repaired image")
     
-    # --- FIX: Use nargs='+' to accept multiple words for the prompt ---
+    # --- Use nargs='+' to accept multiple words for the prompt ---
     parser.add_argument("--prompt", required=True, nargs="+",
                         help="Instructions for the AI (e.g., 'fix blur sharpen fur')")
-    # --- END FIX ---
     
     parser.add_argument("--project", required=True, help="Google Cloud Project ID")
     
