@@ -128,10 +128,13 @@ def run_cmd(cmd_list, show_timer=False, timer_message="Processing", cwd=None, cl
             'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 
             
             # Home variables
-            'USERPROFILE', 'HOME', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA',
+            'USERPROFILE', 'HOME', 'HOMEDRIVE', 'HOMEPATH',
+            'APPDATA', # <-- ADDED FOR WINDOWS DEFAULT AUTH
 
+            # --- THIS IS THE FIX ---
             # We MUST preserve the Google Auth variable
             'GOOGLE_APPLICATION_CREDENTIALS',
+            # --- END FIX ---
             
             # Conda variables (CRITICAL for conda.bat to function)
             'CONDA_EXE', 'CONDA_ROOT', 'CONDA_SHLVL', 'CONDA_BAT',
@@ -488,15 +491,18 @@ def generate_via_gemini(user_desc: str, filename_out: Path):
     if not gen_py.exists():
         raise RuntimeError(f"generate_with_gemini.py not found at {gen_py}")
 
-    # Run in gemini conda environment
+    # --- REVERTED ---
+    # Call python (no -u), pass prompt as a single string, use simple conda_prefix_cmd
     cmd = ["python", str(gen_py), "--prompt", user_desc, "--out", str(filename_out)]
     full_cmd = conda_prefix_cmd(IMAGEN_ENV, cmd)
     
+    # This will produce multi-line output, as requested
     rc, output = run_cmd(full_cmd)
+    # --- END REVERT ---
+    
     if rc != 0:
         raise RuntimeError(f"Image generation failed.\n\nOutput:\n{output}")
     return filename_out
-
 
 
 def generate_via_imagen3(user_desc: str, filename_out: Path):
@@ -508,7 +514,9 @@ def generate_via_imagen3(user_desc: str, filename_out: Path):
     # Get aigen environment name from config
     aigen_env = cfg.get("imagen_env", "aigen")
     
-    # Run in aigen conda environment with suppressed stderr
+    # --- REVERTED ---
+    # Return to the original subprocess.Popen call that worked
+    # (but produced multi-line output).
     cmd = ["python", str(gen_py), "--prompt", user_desc, "--out", str(filename_out)]
     full_cmd = conda_prefix_cmd(aigen_env, cmd)
     
@@ -523,7 +531,7 @@ def generate_via_imagen3(user_desc: str, filename_out: Path):
         proc = subprocess.Popen(
             full_cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, # This was the original, working setting
             text=True,
             encoding='utf-8',
             errors='replace',
@@ -533,7 +541,7 @@ def generate_via_imagen3(user_desc: str, filename_out: Path):
         
         stdout, stderr = proc.communicate()
         
-        # Print stdout
+        # Print stdout (this is what creates the multi-line output)
         if stdout:
             for line in stdout.strip().split('\n'):
                 if line.strip():
@@ -553,17 +561,52 @@ def generate_via_imagen3(user_desc: str, filename_out: Path):
 # ============================================
 
 def generate_ai_image_menu():
-    """Submenu for AI image generation with prompt style selection."""
+    """
+    --- UPDATED ---
+    Submenu for AI image generation.
+    Selects Model *first*, then Prompt Style.
+    """
+    
+    print(f"\n{'─'*60}")
+    print("SELECT AI MODEL")
+    print('─'*60)
+    print("  1. Gemini (FREE, basic quality)")
+    print("  2. Imagen 3 ($0.01, high quality)")
+    print("  3. Back to main menu")
+    print('─'*60)
+    
+    model_choice = input("\nSelect model [1-3]: ").strip()
+    
+    model_name = ""
+    if model_choice == "1":
+        model_name = "gemini"
+    elif model_choice == "2":
+        model_name = "imagen"
+    elif model_choice == "3":
+        return
+    else:
+        print(f"\n{ERR} Invalid option")
+        return
+    
+    # Load prompts and show style submenu
+    prompts_data = load_prompts()
+    prompt_style_submenu(model_name, prompts_data)
+
+
+def prompt_style_submenu(model_name: str, prompts_data: dict):
+    """
+    --- NEW FUNCTION ---
+    Shows the prompt style selection menu *after* a model is chosen.
+    """
     
     # Load prompts
-    prompts_data = load_prompts()
     prompts = prompts_data["prompts"]
     default_prompt = prompts_data.get("default_prompt", "side_profile")
     allow_custom = cfg.get("allow_custom_prompts", True)
     
     while True:
         print(f"\n{'─'*60}")
-        print("SELECT PROMPT STYLE")
+        print(f"SELECT PROMPT STYLE (for {model_name.title()})")
         print('─'*60)
         
         # List available prompt styles
@@ -583,7 +626,7 @@ def generate_ai_image_menu():
             print(f"  {custom_option}. {custom_info.get('name', 'Custom Prompt')}")
             print(f"     └─ {custom_info.get('description', 'Enter your own description')}")
         
-        print(f"  {back_option}. Back to main menu")
+        print(f"  {back_option}. Back to model selection")
         print('─'*60)
         
         choice = input(f"\nSelect prompt style [1-{back_option}]: ").strip()
@@ -593,7 +636,7 @@ def generate_ai_image_menu():
             
             # Back
             if choice_num == back_option:
-                return
+                return  # Goes back to generate_ai_image_menu()
             
             # Custom prompt
             if allow_custom and choice_num == custom_option:
@@ -605,22 +648,26 @@ def generate_ai_image_menu():
                 print(f"\n{ERR} Invalid selection")
                 continue
             
-            # Now get subject and AI model
-            generate_with_prompt_style(selected_style, prompts_data)
+            # Now get subject and generate
+            # Pass model_name down
+            generate_with_prompt_style(selected_style, model_name, prompts_data)
             
         except ValueError:
             print(f"\n{ERR} Invalid input")
 
 
-def generate_with_prompt_style(prompt_style: str, prompts_data: dict):
+def generate_with_prompt_style(prompt_style: str, model_name: str, prompts_data: dict):
     """
-    Generate image with selected prompt style.
+    --- UPDATED ---
+    Generate image with selected prompt style and pre-selected model.
+    Removes confirmation prompt.
     
     Args:
         prompt_style: Selected prompt key or "custom"
+        model_name: "gemini" or "imagen"
         prompts_data: Loaded prompts configuration
     """
-    print(f"\n{'─'*60}") # <-- TYPO FIX
+    print(f"\n{'─'*60}")
     if prompt_style == "custom":
         print("CUSTOM PROMPT")
     else:
@@ -645,29 +692,16 @@ def generate_with_prompt_style(prompt_style: str, prompts_data: dict):
     preview = full_prompt[:150] + "..." if len(full_prompt) > 150 else full_prompt
     print(f"   {preview}")
     
-    confirm = input("\nContinue with this prompt? [Y/n]: ").strip().lower()
-    if confirm and confirm not in ['y', 'yes', '']:
-        return
+    # --- REMOVED CONFIRMATION PROMPT ---
+    # confirm = input("\nContinue with this prompt? [Y/n]: ").strip().lower()
+    # if confirm and confirm not in ['y', 'yes', '']:
+    #     return
     
-    # Select AI model
-    print(f"\n{'─'*60}")
-    print("SELECT AI MODEL")
-    print('─'*60)
-    print("  1. Gemini (FREE, basic quality)")
-    print("  2. Imagen 3 ($0.01, high quality)")
-    print("  3. Cancel")
-    print('─'*60)
+    # --- REMOVED MODEL SELECTION ---
+    # Model is already chosen
     
-    model_choice = input("\nSelect model [1-3]: ").strip()
-    
-    if model_choice == "1":
-        generate_image_interactive(full_prompt, "gemini")
-    elif model_choice == "2":
-        generate_image_interactive(full_prompt, "imagen")
-    elif model_choice == "3":
-        return
-    else:
-        print(f"\n{ERR} Invalid option")
+    # Generate image
+    generate_image_interactive(full_prompt, model_name)
 
 
 def generate_image_interactive(full_prompt: str, model: str):

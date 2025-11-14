@@ -9,13 +9,15 @@ See CREDENTIALS_SETUP.md for detailed setup instructions.
 import os
 import sys
 
-# Suppress gRPC warnings before any Google imports
+# Suppress gRPC warnings
 os.environ['GRPC_VERBOSITY'] = 'ERROR'
 os.environ['GLOG_minloglevel'] = '2'
 
 import argparse
 import warnings
 from pathlib import Path
+import time
+import threading
 
 # Suppress deprecation warnings
 warnings.filterwarnings('ignore', category=UserWarning)
@@ -24,7 +26,12 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress TensorFlow warnings
 
 
 try:
-    from vertexai.preview.vision_models import ImageGenerationModel
+    # --- THIS IS THE FIX ---
+    # This script ONLY generates, it does not edit.
+    # We only import the classes it actually needs.
+    from vertexai.vision_models import ImageGenerationModel, Image
+    # --- END FIX ---
+    
     import vertexai
     import google.auth
     from google.auth.exceptions import DefaultCredentialsError
@@ -32,7 +39,7 @@ except ImportError as e:
     print("[X] ERROR: Missing required library.")
     print("    Please install: pip install google-cloud-aiplatform")
     print("\n    Or activate the correct conda environment:")
-    print("    conda activate imagen")
+    print("    conda activate aigen")
     sys.exit(1)
 
 # Detailed prompt template optimized for depth perception
@@ -51,6 +58,51 @@ NEGATIVE_PROMPT = """
 multiple views, extreme perspective, heavy distortion, bokeh, atmospheric haze, motion blur, color, sepia, tinted backgrounds, text, watermarks, logos, busy patterns, cluttered composition, soft focus, depth of field, vignetting, chromatic aberration, noise, grain, artifacts, compression, low resolution, blurry edges, flat lighting, overexposure, underexposure, harsh shadows, multiple light sources, reflections, lens flare
 """
 
+
+class ProgressIndicator:
+    """Shows a simple progress indicator with elapsed time during long operations."""
+    def __init__(self, message="Processing"):
+        self.message = message
+        self.running = False
+        self.thread = None
+        self.start_time = None
+        
+    def _animate(self):
+        # Simple ASCII spinner - works on all systems
+        spinner = ['|', '/', '-', '\\']
+        idx = 0
+        while self.running:
+            elapsed = time.time() - self.start_time
+            mins, secs = divmod(int(elapsed), 60)
+            time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
+            # --- REVERTED ---
+            # Original code with just \r
+            sys.stdout.write(f"\r  {spinner[idx]} {self.message} [{time_str}]")
+            # --- END REVERT ---
+            sys.stdout.flush()
+            idx = (idx + 1) % len(spinner)
+            time.sleep(0.2)
+    
+    def start(self):
+        self.running = True
+        self.start_time = time.time()
+        self.thread = threading.Thread(target=self._animate, daemon=True)
+        self.thread.start()
+    
+    def stop(self, success_msg=None):
+        self.running = False
+        if self.thread:
+            self.thread.join()
+        elapsed = time.time() - self.start_time
+        mins, secs = divmod(int(elapsed), 60)
+        time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
+        if success_msg:
+            # Clear line and print success with ASCII only
+            sys.stdout.write(f"\r  [OK] {success_msg} [{time_str}]" + " " * 20 + "\n")
+            sys.stdout.flush()
+        else:
+            sys.stdout.write("\r" + " " * 80 + "\r")
+            sys.stdout.flush()
 
 def check_credentials():
     """
@@ -110,9 +162,12 @@ def generate_image(prompt_text: str, output_filename: str):
     
     location = os.environ.get("GOOGLE_CLOUD_REGION", "us-central1")
     
-    print(f"Generating image with Imagen 3 AI...")
-    print(f"Project: {project_id}, Region: {location}")
-    print(f"Description: {prompt_text}")
+    print(f"Initializing Imagen 3 AI...")
+    print(f"  Project: {project_id}, Region: {location}")
+    print(f"  Description: {prompt_text[:60]}...")
+    
+    progress = ProgressIndicator("Generating image with Imagen 3 AI")
+    progress.start()
     
     try:
         # Initialize Vertex AI with credentials
@@ -139,13 +194,15 @@ def generate_image(prompt_text: str, output_filename: str):
             image = images.images[0]
             image.save(location=output_filename)
             
-            print(f"[OK] Image saved: {output_filename}")
+            progress.stop("Image generated successfully")
             return True
         else:
+            progress.stop()
             print("[X] Failed to generate image. No images returned.")
             return False
             
     except Exception as e:
+        progress.stop()
         error_msg = str(e).lower()
         
         # Provide specific error messages for common issues
@@ -200,11 +257,16 @@ def main():
         description="Generate images using Google Imagen 3 via Vertex AI",
         epilog="See CREDENTIALS_SETUP.md for authentication setup instructions."
     )
+    
+    # --- REVERTED ---
+    # Reverted to accept a single string, not nargs=+
     parser.add_argument(
         "--prompt", 
         required=True, 
         help="Description of the image to generate"
     )
+    # --- END REVERT ---
+    
     parser.add_argument(
         "--out", 
         required=True, 
@@ -213,7 +275,11 @@ def main():
     
     args = parser.parse_args()
     
+    # --- REVERTED ---
+    # No longer joining a list
     success = generate_image(args.prompt, args.out)
+    # --- END REVERT ---
+    
     sys.exit(0 if success else 1)
 
 

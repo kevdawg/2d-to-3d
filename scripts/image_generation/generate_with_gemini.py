@@ -61,8 +61,10 @@ class ProgressIndicator:
             elapsed = time.time() - self.start_time
             mins, secs = divmod(int(elapsed), 60)
             time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
-            # Use ASCII only
+            # --- REVERTED ---
+            # Original code with just \r
             sys.stdout.write(f"\r  {spinner[idx]} {self.message} [{time_str}]")
+            # --- END REVERT ---
             sys.stdout.flush()
             idx = (idx + 1) % len(spinner)
             time.sleep(0.2)
@@ -128,7 +130,9 @@ def sdk_generate_image(prompt_text: str, out_path: Path):
                 if hasattr(part, 'inline_data') and part.inline_data:
                     img_bytes = part.inline_data.data
                     result = save_image_bytes(img_bytes, out_path)
-                    progress.stop(f"Image generated successfully ({len(img_bytes)//1024} KB)")
+                    # --- UPDATED SUCCESS MESSAGE ---
+                    progress.stop("Image generated successfully")
+                    # --- END UPDATE ---
                     return result
         
         progress.stop()
@@ -141,14 +145,24 @@ def sdk_generate_image(prompt_text: str, out_path: Path):
 
 def main():
     parser = argparse.ArgumentParser(description="Generate images using Gemini 2.0 Flash (FREE)")
+    
+    # --- REVERTED ---
+    # Reverted to accept a single string, not nargs=+
     parser.add_argument("--prompt", required=True, help="Description of what to generate")
+    # --- END REVERT ---
+    
     parser.add_argument("--out", required=True, help="Output file path")
     args = parser.parse_args()
 
     try:
         p = Path(args.out)
         p.parent.mkdir(parents=True, exist_ok=True)
+        
+        # --- REVERTED ---
+        # No longer joining a list
         outp = sdk_generate_image(args.prompt, p)
+        # --- END REVERT ---
+        
         print(f"\nSaved to: {outp}")
     except Exception as e:
         print(f"\n[ERROR] Image generation failed: {e}")
