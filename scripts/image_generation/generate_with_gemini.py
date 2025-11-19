@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-generate_with_gemini.py - FREE tier image generation using Gemini 2.0 Flash.
+generate_with_gemini.py - Standard-quality image generation using Vertex AI.
+This script provides the "basic quality" option for the pipeline.
 
 Usage:
   python generate_with_gemini.py --prompt "oak tree bust" --out ../2D_files/out.png
 
 Notes:
- - Install SDK: pip install google-genai
- - Set GEMINI_API_KEY in your environment (setx GEMINI_API_KEY "KEY" for persistence).
- - Uses Gemini 2.0 Flash with native image generation (FREE tier).
+ - This script uses the Vertex AI library, consistent with other AI scripts.
+ - It uses the GOOGLE_CLOUD_PROJECT and 'gcloud auth' credentials.
+ - It does NOT use a GEMINI_API_KEY.
 """
 
 import os
@@ -17,31 +18,39 @@ from pathlib import Path
 import sys
 import time
 import threading
+import warnings
+
+# Suppress gRPC warnings
+os.environ['GRPC_VERBOSITY'] = 'ERROR'
+os.environ['GLOG_minloglevel'] = '2'
+warnings.filterwarnings('ignore', category=UserWarning)
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 try:
-    from google import genai
-    from google.genai import types
-    HAS_GENAI = True
+    # Import from the Vertex AI library
+    import vertexai
+    from vertexai.vision_models import ImageGenerationModel, Image
+    import google.auth
+    from google.auth.exceptions import DefaultCredentialsError
+    HAS_VERTEXAI = True
 except Exception as e:
-    HAS_GENAI = False
-    GENAI_IMPORT_ERROR = e
+    HAS_VERTEXAI = False
+    VERTEXAI_IMPORT_ERROR = e
 
-PROMPT_TEMPLATE = """Grayscale, photorealistic, **razor-sharp**, ultra-detailed, single image suitable for bas relief and CNC cutout, designed to maximize perceived depth and dynamic form. **{description} on a perfectly transparent background.** The object(s) are presented in a perfectly clean **manner**, captured from a strong side profile view with a subtle, controlled turn to reveal maximal volumetric detail. If there are multiple objects then every object must be fully visible and distinctly separated from all other objects and the image edges, with no overlap whatsoever. If there is a singular object, place it prominently in the center, ensuring maximum detail without excessive cropping.
+# Prompt template (can be the same as Imagen 3's)
+PROMPT_TEMPLATE = """
+Grayscale, photorealistic, razor-sharp, ultra-detailed, single image suitable for bas relief and CNC cutout, designed to maximize perceived depth and dynamic form. {description}. The object(s) are presented in a perfectly clean manner to reveal maximal volumetric detail and reduce any distraction from the subject, place it prominently in the center, ensuring maximum detail.
 
-**Visual Style:**
-Grayscale rendering, studio quality, 8K resolution, **hyper-sharp focus throughout the entire object, with microscopic detail**, meticulously rendered. The image should resemble a highly detailed heightmap or individual clay sculptures, emphasizing volumetric form through subtle tonal variations from pure black to pure white. Every single surface contour, undulation, and intricate detail of each object must be clearly defined by precise changes in luminosity, creating an undeniable sense of three-dimensional depth within the two-dimensional image. Ensure **laser-sharp**, smoothly anti-aliased silhouettes and consistently rendered organic edges without abrupt terminations for all objects.
+Visual Style: Grayscale rendering, studio quality, 8K resolution, hyper-sharp focus throughout the entire object, with microscopic detail, meticulously rendered. The image should resemble a highly detailed heightmap or individual clay sculptures, with every surface texture, edge, and contour clearly defined. Lighting is controlled and even, designed to emphasize form through subtle gradients and shadows that enhance depth without creating harsh contrasts. The tonal range is optimized to capture fine elevation changes, with deep blacks within the object's form representing the deepest recesses and bright whites for the highest points.
 
-**Lighting:**
-Optimized for **extreme depth perception and detail definition**: a single, strong, very shallow-angle directional key light (e.g., from top-left, almost skimming the surface) combined with subtle ambient occlusion and soft fill to illuminate recessed areas. The lighting should meticulously sculpt the forms of all objects, generating precise, high-contrast gradients of light and shadow that define every peak and valley with absolute clarity, making each individual object appear as if it has significant physical depth. Avoid harsh, blown-out highlights or completely black, featureless shadows; instead, aim for a full tonal range that emphasizes form.
+Composition & Depth: The subject is isolated on a pure white background with no distractions or shadows. The viewing angle is carefully chosen to maximize the perception of three-dimensional form. If multiple elements are present, they should be arranged to showcase clear spatial relationships and depth layering. The framing is tight but not cropped, ensuring all important details are visible while maintaining a clear focus on the primary subject.
 
-**Background & Composition:**
-All objects are individually isolated on a **perfectly transparent background.** The composition features a clean, arranged display of the separate objects, ensuring ample clear space around each one. No clipping or overlapping of any kind. Each object should be distinct and prominently displayed within its own conceptual space on the canvas, highlighting its iconic silhouette and volumetric shape for bas relief interpretation.
+Technical Requirements: Perfect edge definition with no soft focus or depth-of-field blur. Uniform sharpness across the entire image plane. High contrast in surface detail while maintaining smooth tonal transitions. Clear separation between different depth planes. Optimal lighting to reveal all surface variations and contours. No atmospheric effects, haze, or environmental obscuration.
+"""
 
-**Material & Texture:**
-Extreme emphasis on **grayscale PBR (Physically Based Rendering) material definition and intricate surface detailing**. Textures must be ultra-high-frequency and rich in microscopic detail, showcasing every surface characteristic (e.g., wood grain, metallic sheen, fabric weave, minute surface imperfections, organic textures, individual hairs/fibers) primarily through variations in luminosity and contrast. The texture and detail should actively and precisely contribute to defining the contours and perceived depth across the entire form of each object.
-
-**Negative Prompts:**
---no multiple views, extreme perspective, heavy distortion, bokeh, atmospheric haze, motion blur, color, sepia, tinted, harsh self-shadows, reflections, gradients, text, watermarks, branding, logo, artistic stylization, flat rendering, jagged edges, pixelation, background objects, unrealistic shading, no depth, 2d, cartoon, cropped, partial view, incorrect number of objects, identical objects, overlapping, touching, stacked, chaotic arrangement, unharmonious composition, **blurry, soft focus, low detail, smudged, blurry edges, lack of definition, dull lighting**
+# Negative prompt
+NEGATIVE_PROMPT = """
+multiple views, extreme perspective, heavy distortion, bokeh, atmospheric haze, motion blur, color, sepia, tinted backgrounds, text, watermarks, logos, busy patterns, cluttered composition, soft focus, depth of field, vignetting, chromatic aberration, noise, grain, artifacts, compression, low resolution, blurry edges, flat lighting, overexposure, underexposure, harsh shadows, multiple light sources, reflections, lens flare
 """
 
 
@@ -54,17 +63,13 @@ class ProgressIndicator:
         self.start_time = None
         
     def _animate(self):
-        # Simple ASCII spinner - works on all systems
         spinner = ['|', '/', '-', '\\']
         idx = 0
         while self.running:
             elapsed = time.time() - self.start_time
             mins, secs = divmod(int(elapsed), 60)
             time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
-            # --- REVERTED ---
-            # Original code with just \r
             sys.stdout.write(f"\r  {spinner[idx]} {self.message} [{time_str}]")
-            # --- END REVERT ---
             sys.stdout.flush()
             idx = (idx + 1) % len(spinner)
             time.sleep(0.2)
@@ -83,74 +88,100 @@ class ProgressIndicator:
         mins, secs = divmod(int(elapsed), 60)
         time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
         if success_msg:
-            # Clear line and print success with ASCII only
             sys.stdout.write(f"\r  [OK] {success_msg} [{time_str}]" + " " * 20 + "\n")
             sys.stdout.flush()
         else:
             sys.stdout.write("\r" + " " * 80 + "\r")
             sys.stdout.flush()
 
-
-def save_image_bytes(image_bytes: bytes, out_path: Path):
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "wb") as f:
-        f.write(image_bytes)
-    return out_path
-
-
-def sdk_generate_image(prompt_text: str, out_path: Path):
-    """Generate image using Gemini 2.0 Flash (FREE tier)."""
-    if not HAS_GENAI:
-        raise RuntimeError(f"google-genai SDK not installed: {GENAI_IMPORT_ERROR}")
-
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY not set. Use: setx GEMINI_API_KEY \"YOUR_KEY\" and reopen CMD.")
-
-    client = genai.Client(api_key=api_key)
-    final_prompt = f"Generate an image: {PROMPT_TEMPLATE.format(description=prompt_text)}"
+def check_credentials():
+    """
+    Check if credentials are properly configured.
+    """
+    project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
+    if not project_id:
+        raise RuntimeError(
+            "\n" + "="*60 + "\n"
+            "ERROR: GOOGLE_CLOUD_PROJECT environment variable not set.\n"
+            "="*60 + "\n\n"
+            "This script uses Vertex AI and requires a Google Cloud Project."
+        )
     
-    progress = ProgressIndicator("Generating image with Gemini AI")
+    try:
+        credentials, detected_project = google.auth.default()
+        return credentials, project_id
+    except DefaultCredentialsError:
+        raise RuntimeError(
+            "\n" + "="*60 + "\n"
+            "ERROR: Could not find Google Cloud credentials.\n"
+            "="*60 + "\n\n"
+            "Run 'gcloud auth application-default login' to authenticate."
+        )
+
+
+def generate_image(prompt_text: str, output_filename: str):
+    """Generates an image using a standard Imagen model on Vertex AI."""
+    
+    if not HAS_VERTEXAI:
+        raise RuntimeError(f"Vertex AI SDK not installed: {VERTEXAI_IMPORT_ERROR}")
+
+    try:
+        credentials, project_id = check_credentials()
+    except RuntimeError as e:
+        print(str(e))
+        return False
+    
+    location = os.environ.get("GOOGLE_CLOUD_REGION", "us-central1")
+    
+    print(f"Initializing Imagen (Basic) on Vertex AI...")
+    print(f"  Project: {project_id}, Region: {location}")
+    print(f"  Description: {prompt_text[:60]}...")
+    
+    progress = ProgressIndicator("Generating image with Imagen (Vertex AI)")
     progress.start()
     
     try:
-        gen_config = types.GenerateContentConfig(
-            response_modalities=["TEXT", "IMAGE"]
+        vertexai.init(project=project_id, location=location, credentials=credentials)
+        
+        # --- THIS IS THE KEY CHANGE ---
+        # Load the standard, "basic" image generation model
+        model = ImageGenerationModel.from_pretrained("imagegeneration@006")
+        
+        # Create the final prompt
+        final_prompt = PROMPT_TEMPLATE.format(description=prompt_text)
+        
+        # Generate the image
+        images = model.generate_images(
+            prompt=final_prompt,
+            negative_prompt=NEGATIVE_PROMPT,
+            number_of_images=1,
+            aspect_ratio="1:1",
+            # Safety settings for this model version
+            # safety_filter_level="block_some", 
+            # person_generation="allow_adult",
         )
         
-        response = client.models.generate_content(
-            model="gemini-2.0-flash-preview-image-generation",
-            contents=final_prompt,
-            config=gen_config
-        )
-        
-        # Extract image from response
-        if response.candidates and response.candidates[0].content.parts:
-            for part in response.candidates[0].content.parts:
-                if hasattr(part, 'inline_data') and part.inline_data:
-                    img_bytes = part.inline_data.data
-                    result = save_image_bytes(img_bytes, out_path)
-                    # --- UPDATED SUCCESS MESSAGE ---
-                    progress.stop("Image generated successfully")
-                    # --- END UPDATE ---
-                    return result
-        
-        progress.stop()
-        raise RuntimeError("No image data found in response")
-        
+        if images and len(images.images) > 0:
+            image = images.images[0]
+            image.save(location=output_filename)
+            
+            progress.stop("Image generated successfully")
+            return True
+        else:
+            progress.stop()
+            print("[X] Failed to generate image. No images returned.")
+            return False
+            
     except Exception as e:
         progress.stop()
-        raise RuntimeError(f"Image generation failed: {e}")
+        print(f"\n[X] Error during image generation: {e}")
+        return False
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate images using Gemini 2.0 Flash (FREE)")
+    parser = argparse.ArgumentParser(description="Generate images using a standard Imagen model on Vertex AI")
     
-    # --- REVERTED ---
-    # Reverted to accept a single string, not nargs=+
     parser.add_argument("--prompt", required=True, help="Description of what to generate")
-    # --- END REVERT ---
-    
     parser.add_argument("--out", required=True, help="Output file path")
     args = parser.parse_args()
 
@@ -158,12 +189,12 @@ def main():
         p = Path(args.out)
         p.parent.mkdir(parents=True, exist_ok=True)
         
-        # --- REVERTED ---
-        # No longer joining a list
-        outp = sdk_generate_image(args.prompt, p)
-        # --- END REVERT ---
+        outp = generate_image(args.prompt, args.out)
         
-        print(f"\nSaved to: {outp}")
+        if not outp:
+             raise RuntimeError("Image generation failed (see error above)")
+             
+        print(f"\nSaved to: {args.out}")
     except Exception as e:
         print(f"\n[ERROR] Image generation failed: {e}")
         sys.exit(2)

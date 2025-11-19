@@ -56,7 +56,24 @@ auto_enhance_preset: "light"                # Options: "none", "light", "balance
 # ----------------------------------------
 remove_background: true
 bg_removal_method: "rembg"  # "removebg" ($0.01/image) or "rembg" (free)
-bg_removal_model: "isnet-general-use" #"u2net", "isnet-general-use", "u2net_human_seg", "isnet-anime"
+bg_removal_model: "isnet-general-use" #"u2net", "u2netp", "isnet-general-use"
+
+# --- NEW: Advanced Settings ---
+# (Optional) A second model to combine with the first for better accuracy.
+# Can be any rembg model (e.g., "u2net", "u2netp", "silueta").
+bg_removal_model_secondary: "u2netp" 
+
+# How to combine the two models.
+# "union" (OR): Fixes missing parts (dog ears).
+# "intersection" (AND): Fixes extra artifacts (cow antlers).
+# "none": (Default) Only use the primary model.
+bg_model_combine_mode: "union"
+
+# (Optional) Enable alpha matting for cleaner edges (removes halos).
+bg_alpha_matting: true
+bg_matting_foreground_threshold: 240 # Pixels > this are 100% subject
+bg_matting_background_threshold: 10  # Pixels < this are 100% background
+
 bg_crop_enabled: true
 bg_crop_margin: 10
 mask_depth_map: true
@@ -97,6 +114,7 @@ marigold_presets:
     marigold_processing_res: 384
     marigold_match_input_res: false
     marigold_enhance_photo: false
+    use_tiled_depth: true
   
   low_quality:
     marigold_steps: 5
@@ -133,6 +151,23 @@ marigold_background_color: "white"  # Options: "gray", "white", "black", "light_
 # Gray (128,128,128) = neutral mid-depth
 # White (255,255,255) = far depth (background recedes)
 # Black (0,0,0) = near depth (background comes forward)
+
+# Settings for high-quality tiled depth generation
+# This is much slower but captures fine details.
+tiled_depth_settings:
+  # This is the global 'on/off' switch for the feature.
+  # Individual presets must ALSO set 'use_tiled_depth: true'.
+  enabled: true
+  
+  marigold_tiled_cli: "../scripts/depth_generation/marigold_tiled_cli.py"
+  
+  global_res: 768     # Resolution for the fast global context pass
+  tile_size: 1024     # Size of each detail tile (px)
+  tile_overlap: 256   # Overlap between tiles (px)
+  
+  # Marigold settings to use for *each tile*
+  tile_steps: 5
+  tile_ensemble: 3
 
 # ----------------------------------------
 # 3D Extrusion Parameters
@@ -225,45 +260,42 @@ region_processing:
 # ----------------------------------------
 # Mesh Repair & Optimization
 # ----------------------------------------
-enable_mesh_repair: true #"auto" false
+enable_mesh_repair: true #"auto" false true
 trim_borders_before_repair: false
+
 mesh_repair_settings:
-  smooth_iterations: 0           # Keep minimal
-  target_faces: 0                # No decimation by default
-  fill_holes: false              # CHANGED: Don't fill holes in relief models
-  ensure_manifold: false         # CHANGED: Relief models aren't manifold volumes
+  smooth_iterations: 0           # Keep minimal (0-1)
+  fill_holes: false              # Relief models shouldn't have holes
+  ensure_manifold: false         # Relief models aren't manifold
   save_before_repair: true
+  # Can be an integer (e.g., 100000) for absolute face count
+  # or a string (e.g., "1500/cm^2") for density.
+  target_outputs:
+    - 500000
+    - "6000/cm2"
+    - 20000
 
 # Quality-dependent repair rules is repair is set to 'auto'
 mesh_repair_by_quality:
   ultra_low_quality:
     smooth_iterations: 1
-    target_faces: 100000
+    target_outputs: [10000]
     fill_holes: true
     ensure_manifold: true
     save_before_repair: true
     enabled: true
   low_quality:
-    enabled: false
-    fill_holes: false
+    enabled: true
+    # target_outputs: [1000000, 500000, "1500/cm^2"]
   medium_quality:
-    enabled: false
-    smooth_iterations: 1         # REDUCED from 2
-    target_faces: 100000
-    fill_holes: false            # ADDED
-    ensure_manifold: false       # ADDED
+    enabled: true
+    smooth_iterations: 1
   high_quality:
     enabled: true
-    smooth_iterations: 1         # REDUCED from 2
-    target_faces: 200000
-    fill_holes: false            # ADDED
-    ensure_manifold: false       # ADDED
+    smooth_iterations: 1
   ultra_high_quality:
     enabled: true
-    smooth_iterations: 1         # REDUCED from 2
-    target_faces: 400000
-    fill_holes: true            # ADDED
-    ensure_manifold: false       # ADDED
+    smooth_iterations: 1
 
 # ----------------------------------------
 # AI Enhancement (before depth generation)
@@ -272,7 +304,7 @@ ai_enhancement:
   enabled: true  # Set to false to skip AI enhancement
   
   # Upscaling method
-  upscale_method: "realesrgan"  # Great general purpose
+  #upscale_method: "realesrgan"  # Great general purpose
   upscale_method: "lanczos"  # Fast!
   #upscale_method: "waifu2x"  # Great for anime characters
   #upscale_method: "gfpgan"  # Specialized for faces

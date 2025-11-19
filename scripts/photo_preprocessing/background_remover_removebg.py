@@ -3,6 +3,9 @@
 Background Removal using remove.bg API or rembg.
 High quality background removal.
 Includes automatic cropping and optional transparent padding.
+Supports advanced rembg features:
+- Dual-model blending (union/intersection)
+- Alpha matting for edge refinement
 """
 import os
 import sys
@@ -181,9 +184,17 @@ def remove_background_removebg(input_path, output_path, api_key=None, crop=True,
         raise RuntimeError(f"Unexpected error: {e}")
 
 
-def remove_background_rembg(input_path, output_path, model="isnet-general-use", crop=True, margin=10, padding=0):
+def remove_background_rembg(input_path, output_path, crop=True, margin=10, padding=0, **kwargs):
     """
     Remove background using rembg (free, offline).
+    --- UPDATED ---
+    Now supports advanced features via **kwargs:
+    - model: (str) The primary model to use (e.g., "isnet-general-use")
+    - model_secondary: (str) Name of a second model to blend.
+    - model_combine_mode: (str) "union" or "intersection".
+    - alpha_matting: (bool) Enable/disable edge matting.
+    - matting_fg_threshold: (int) Foreground anchor.
+    - matting_bg_threshold: (int) Background anchor.
     """
     try:
         from rembg import remove, new_session
@@ -193,17 +204,78 @@ def remove_background_rembg(input_path, output_path, model="isnet-general-use", 
     input_path = Path(input_path)
     output_path = Path(output_path)
     
+    # --- NEW: Get advanced settings from kwargs ---
+    # Get the primary model from kwargs
+    model = kwargs.get('model', 'isnet-general-use')
+    
+    model_secondary = kwargs.get('model_secondary', None)
+    model_combine_mode = kwargs.get('model_combine_mode', 'none').lower()
+    
+    use_alpha_matting = kwargs.get('alpha_matting', False)
+    matting_fg_threshold = kwargs.get('matting_fg_threshold', 240)
+    matting_bg_threshold = kwargs.get('matting_bg_threshold', 10)
+    
+    # Determine if we need to load a second model
+    load_secondary = model_secondary and model_secondary != "none" and model_combine_mode in ["union", "intersection"]
+
     print(f"  Removing background with rembg ({model})...")
+    if load_secondary:
+        print(f"  Combining with secondary model: {model_secondary} (mode: {model_combine_mode})")
+    if use_alpha_matting and not load_secondary: # Matting only works in single-model mode
+        print(f"  Alpha matting enabled (fg: {matting_fg_threshold}, bg: {matting_bg_threshold})")
+    # --- END NEW ---
     
     try:
-        # Create session with specified model
-        session = new_session(model)
-        
-        # Remove background
+        # Load input image
         with Image.open(input_path) as input_img:
-            input_img = ImageOps.exif_transpose(input_img)
-            output_img = remove(input_img, session=session)
-            
+            input_img_exif = ImageOps.exif_transpose(input_img)
+        
+            # --- NEW: Dual-Model Logic ---
+            if load_secondary:
+                # 1. Get primary mask
+                print(f"    Processing primary model ({model})...")
+                session_primary = new_session(model)
+                mask_primary = remove(input_img_exif, session=session_primary, only_mask=True)
+                
+                # 2. Get secondary mask
+                print(f"    Processing secondary model ({model_secondary})...")
+                
+                # --- THIS IS THE FIX ---
+                session_secondary = new_session(model_secondary) 
+                # --- END OF FIX ---
+                
+                mask_secondary = remove(input_img_exif, session=session_secondary, only_mask=True)
+                
+                # 3. Combine masks
+                print(f"    Combining masks using '{model_combine_mode}'...")
+                mask_primary_arr = np.array(mask_primary)
+                mask_secondary_arr = np.array(mask_secondary)
+                
+                if model_combine_mode == "union":
+                    # UNION (OR): Keep pixel if *either* model found it. Fixes "missing ears".
+                    combined_mask_arr = np.maximum(mask_primary_arr, mask_secondary_arr)
+                else: # intersection
+                    # INTERSECTION (AND): Keep pixel only if *both* models found it. Fixes "cow antlers".
+                    combined_mask_arr = np.minimum(mask_primary_arr, mask_secondary_arr)
+                
+                final_mask = Image.fromarray(combined_mask_arr)
+                
+                # 4. Apply combined mask to original image
+                output_img = Image.new("RGBA", input_img_exif.size, (0, 0, 0, 0))
+                output_img.paste(input_img_exif, (0, 0), final_mask)
+
+            else:
+                # --- Standard Single-Model Path ---
+                session = new_session(model)
+                output_img = remove(
+                    input_img_exif, 
+                    session=session,
+                    alpha_matting=use_alpha_matting,
+                    alpha_matting_foreground_threshold=matting_fg_threshold,
+                    alpha_matting_background_threshold=matting_bg_threshold
+                )
+            # --- END NEW ---
+
             # Ensure RGBA
             if output_img.mode != 'RGBA':
                 output_img = output_img.convert('RGBA')
@@ -224,20 +296,30 @@ def remove_background_rembg(input_path, output_path, model="isnet-general-use", 
         return output_path
         
     except Exception as e:
+        if "session" not in locals() and "session_primary" not in locals():
+             raise RuntimeError(f"rembg failed: Could not load model '{model}'. Check model name and internet connection.")
         raise RuntimeError(f"rembg failed: {e}")
 
 
 def remove_background(input_path, output_path, method="removebg", crop=True, margin=10, padding=0, **kwargs):
     """
     Remove background using specified method and optionally crop/pad.
+    **kwargs are passed to rembg.
     """
     if method == "removebg":
+        # Pass api_key from kwargs if it exists
         return remove_background_removebg(
             input_path, output_path, kwargs.get('api_key'), crop, margin, padding=padding
         )
     elif method == "rembg":
+        # Pass all kwargs directly to remove_background_rembg
         return remove_background_rembg(
-            input_path, output_path, kwargs.get('model', 'isnet-general-use'), crop, margin, padding=padding
+            input_path, 
+            output_path, 
+            crop, 
+            margin, 
+            padding=padding,
+            **kwargs  # <-- Pass all settings
         )
     else:
         raise ValueError(f"Unknown method: {method}. Use 'removebg' or 'rembg'")
@@ -260,10 +342,31 @@ if __name__ == "__main__":
                        help="Pixels to leave around subject when cropping (default: 10)")
     parser.add_argument("--padding", type=int, default=0,
                        help="Add N pixels of transparent padding *after* cropping (default: 0)")
+
+    # Advanced settings
+    parser.add_argument("--model-secondary", default=None,
+                       help="rembg secondary model to blend (e.g., u2netp)")
+    parser.add_argument("--combine-mode", choices=["none", "union", "intersection"], default="none",
+                       help="How to blend models (default: none)")
+    parser.add_argument("--alpha-matting", action='store_true',
+                       help="Enable alpha matting for cleaner edges")
+    parser.add_argument("--matting-fg", type=int, default=240,
+                       help="Alpha matting foreground threshold (0-255)")
+    parser.add_argument("--matting-bg", type=int, default=10,
+                       help="Alpha matting background threshold (0-255)")
     
     args = parser.parse_args()
     
     try:
+        # Pass arguments to the function
+        # We filter out None values for secondary model to avoid issues
+        kwargs = {}
+        if args.model_secondary: kwargs['model_secondary'] = args.model_secondary
+        if args.combine_mode: kwargs['model_combine_mode'] = args.combine_mode
+        if args.alpha_matting: kwargs['alpha_matting'] = True
+        kwargs['matting_fg_threshold'] = args.matting_fg
+        kwargs['matting_bg_threshold'] = args.matting_bg
+
         remove_background(
             args.input, 
             args.output, 
@@ -271,10 +374,11 @@ if __name__ == "__main__":
             crop=not args.no_crop,
             margin=args.margin,
             padding=args.padding,
-            api_key=args.api_key, 
-            model=args.model
+            api_key=args.api_key,
+            model=args.model,
+            **kwargs
         )
-        print("\n{OK} Success!")
+        print(f"\n{OK} Success!")
     except Exception as e:
         print(f"\n{ERR} Error: {e}")
         sys.exit(1)

@@ -2,7 +2,7 @@
   "base_template": {
     "prefix": "Grayscale, photorealistic, razor-sharp, ultra-detailed, single image suitable for bas relief and CNC cutout, designed to maximize perceived depth and dynamic form.",
     "suffix": "Studio quality, 8K resolution, hyper-sharp focus throughout the entire object with microscopic detail. The image should resemble a highly detailed heightmap, emphasizing volumetric form through subtle tonal variations from pure black to pure white. Perfect edge definition with no soft focus. Optimal lighting to reveal all surface variations and contours.",
-    "negative": "multiple views, extreme perspective, heavy distortion, bokeh, atmospheric haze, motion blur, color, sepia, tinted backgrounds, text, watermarks, logos, busy patterns, cluttered composition, soft focus, depth of field, vignetting, chromatic aberration, noise, grain, artifacts, compression, low resolution, blurry edges, flat lighting, overexposure, underexposure, harsh shadows"
+    "negative": "multiple views, extreme perspective, heavy distortion, bokeh, atmospheric haze, motion blur, color, sepia, tinted backgrounds, text, watermarks, logos, busy patterns, cluttered composition, soft focus, depth of field, vignetting, chromatic aberration, noise, grain, artifacts, compression, low resolution, blurry edges, flat lighting, overexposure, underexposure, harsh shadows, base, platform, stand, pedestal, plinth, reflections, reflective, glare, glossy, shiny, flat, 2d, illustration, drawing"
   },
   
   "prompts": {

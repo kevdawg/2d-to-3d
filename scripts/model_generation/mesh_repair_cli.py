@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """
 CLI wrapper for mesh repair.
-Runs in depth-to-3d environment where pymeshlab is installed.
+Repairs, optimizes, and decimates a mesh to a target output.
+
+Target can be:
+  - Absolute face count (e.g., --target "100000")
+  - Density (e.g., --target "1500/cm^2")
 """
 import argparse
 import sys
 from pathlib import Path
-
+import re # <-- Import re
 
 def repair_mesh(input_stl, output_stl, settings):
     """
@@ -14,9 +18,10 @@ def repair_mesh(input_stl, output_stl, settings):
     """
     try:
         import pymeshlab
+        import trimesh # <-- Import trimesh for bounding box
     except ImportError:
-        print("[ERROR] PyMeshLab not installed in this environment")
-        print("        Run: pip install pymeshlab")
+        print("[ERROR] PyMeshLab or Trimesh not installed in this environment")
+        print("        Run: pip install pymeshlab trimesh")
         sys.exit(1)
     
     input_stl = Path(input_stl)
@@ -25,13 +30,67 @@ def repair_mesh(input_stl, output_stl, settings):
     print(f"Loading mesh: {input_stl.name}")
     
     ms = pymeshlab.MeshSet()
-    ms.load_new_mesh(str(input_stl))
+    try:
+        ms.load_new_mesh(str(input_stl))
+    except Exception as e:
+        print(f"[ERROR] Failed to load mesh: {e}")
+        print("        This can happen if the raw mesh is empty or extremely corrupt.")
+        return
     
     original_faces = len(ms.current_mesh().face_matrix())
     original_vertices = len(ms.current_mesh().vertex_matrix())
     
+    if original_faces == 0:
+        print("[ERROR] Mesh has 0 faces. Cannot repair.")
+        return
+
     print(f"  Original: {original_vertices:,} vertices, {original_faces:,} faces")
     
+    # --- NEW: Target Calculation Logic ---
+    target_str = settings.get('target', "0")
+    target_face_num = 0
+    
+    # Simplified check for "/cm2" (case-insensitive)
+    if "/cm2" in target_str.lower(): # Make lowercase to be safe
+        # Density target (e.g., "1500/cm^2")
+        try:
+            # --- START OF DENSITY FIX ---
+            # Use re.match to find the first number
+            density_match = re.match(r'^\d+\.?\d*', target_str)
+            if not density_match:
+                raise ValueError("No number found at start of density string")
+                
+            density = float(density_match.group(0))
+            # --- END OF DENSITY FIX ---
+            
+            # Use trimesh to get accurate bounds
+            mesh_trimesh = trimesh.load(str(input_stl))
+            bounds = mesh_trimesh.bounds
+            width_mm_actual = bounds[1][0] - bounds[0][0]
+            height_mm_actual = bounds[1][1] - bounds[0][1]
+            
+            area_cm2 = (width_mm_actual / 10.0) * (height_mm_actual / 10.0)
+            
+            target_face_num = int(area_cm2 * density)
+            
+            print(f"  Target Density: {density}/cm^2")
+            print(f"  Model Area: {area_cm2:.2f} cm^2 ({width_mm_actual:.1f}mm x {height_mm_actual:.1f}mm)")
+            print(f"  Calculated Target: {target_face_num:,} faces")
+            
+        except Exception as e:
+            print(f"[WARNING] Could not parse density '{target_str}': {e}")
+            target_face_num = 0
+    else:
+        # Absolute face count target
+        try:
+            target_face_num = int(target_str)
+            print(f"  Target Faces: {target_face_num:,}")
+        except ValueError:
+            print(f"[WARNING] Invalid target '{target_str}', defaulting to 0")
+            target_face_num = 0
+    
+    # --- END NEW LOGIC ---
+
     # Step 1: Remove duplicates
     print(f"Removing duplicates...")
     ms.meshing_remove_duplicate_faces()
@@ -48,16 +107,12 @@ def repair_mesh(input_stl, output_stl, settings):
         ms.meshing_close_holes(maxholesize=30)
     
     # Step 4: Re-orient faces
-    # Relief models aren't closed volumes, so face reorientation causes issues
-    # print(f"Re-orienting faces...")
-    # ms.meshing_re_orient_faces_coherently()
     print(f"Skipping face reorientation (not needed for relief models)")
     
     # Step 5: Smooth (using Taubin to preserve features)
     smooth_iters = settings.get('smooth_iterations', 0)
     if smooth_iters > 0:
         print(f"Smoothing ({smooth_iters} iterations, Taubin method)...")
-        # Taubin smoothing preserves volume better than Laplacian
         ms.apply_coord_taubin_smoothing(
             lambda_=0.5,        # Smoothing amount
             mu=-0.53,           # Shrinkage prevention
@@ -65,12 +120,22 @@ def repair_mesh(input_stl, output_stl, settings):
         )
     
     # Step 6: Decimate
-    target_faces = settings.get('target_faces', 0)
     current_faces = len(ms.current_mesh().face_matrix())
     
-    if target_faces > 0 and current_faces > target_faces:
-        print(f"Decimating: {current_faces:,} → {target_faces:,} faces...")
-        ms.meshing_decimation_quadric_edge_collapse(targetfacenum=target_faces)
+    # Only decimate if target is positive and less than current
+    if target_face_num > 0 and current_faces > target_face_num:
+        # --- START OF CHARMAP FIX ---
+        print(f"Decimating: {current_faces:,} -> {target_face_num:,} faces...") # Replaced '→'
+        # --- END OF CHARMAP FIX ---
+        ms.meshing_decimation_quadric_edge_collapse(
+            targetfacenum=target_face_num,
+            preservenormal=True,  # Try to preserve surface normals
+            preservetopology=True # Try to prevent topology errors
+        )
+    elif target_face_num > current_faces:
+        print(f"Skipping decimation: Target ({target_face_num:,}) > Current ({current_faces:,})")
+    else:
+        print(f"Skipping decimation: Target is 0 or invalid.")
     
     # Save
     output_stl.parent.mkdir(parents=True, exist_ok=True)
@@ -81,74 +146,36 @@ def repair_mesh(input_stl, output_stl, settings):
     
     print(f"  Final: {final_vertices:,} vertices, {final_faces:,} faces")
     
-    # Check watertight
-    is_watertight = ms.current_mesh().is_compact()
-    if is_watertight:
-        print(f"[OK] Mesh is watertight (printable)")
-    else:
-        print(f"[!] Mesh may have issues")
+    print(f"[OK] Saved: {output_stl.name}")
     
     return output_stl
 
-def validate_repair(input_stl, output_stl):
-    """
-    Quick validation to ensure repair didn't corrupt the mesh.
-    Compares vertex/face counts and bounding boxes.
-    """
-    import trimesh
-    
-    try:
-        original = trimesh.load(input_stl)
-        repaired = trimesh.load(output_stl)
-        
-        # Check vertex count didn't change drastically
-        vert_ratio = len(repaired.vertices) / len(original.vertices)
-        if vert_ratio < 0.5 or vert_ratio > 2.0:
-            print(f"[WARNING] Vertex count changed significantly: {vert_ratio:.2f}x")
-        
-        # Check face count
-        face_ratio = len(repaired.faces) / len(original.faces)
-        if face_ratio < 0.5 or face_ratio > 2.0:
-            print(f"[WARNING] Face count changed significantly: {face_ratio:.2f}x")
-        
-        # Check bounding box didn't shrink
-        orig_size = original.extents
-        repair_size = repaired.extents
-        size_change = (repair_size / orig_size).min()
-        
-        if size_change < 0.9:
-            print(f"[WARNING] Model shrank during repair: {size_change:.2f}x")
-        
-        return True
-        
-    except Exception as e:
-        print(f"[WARNING] Could not validate repair: {e}")
-        return False
-
 def main():
-    parser = argparse.ArgumentParser(description="Repair and optimize mesh")
+    parser = argparse.ArgumentParser(description="Repair and optimize mesh to a specific target")
     parser.add_argument("--input", required=True, help="Input STL file")
     parser.add_argument("--output", required=True, help="Output STL file")
+    
+    parser.add_argument("--target", required=True, 
+                        help="Target output: integer (100000) or density string ('1500/cm^2')")
+    parser.add_argument("--width-mm", required=True, type=float,
+                        help="Model width in mm (from config) for density calculation")
+    
     parser.add_argument("--smooth", type=int, default=0, help="Smoothing iterations")
-    parser.add_argument("--target-faces", type=int, default=0, help="Target face count")
     parser.add_argument("--no-fill-holes", action='store_true', help="Skip hole filling")
     parser.add_argument("--no-manifold", action='store_true', help="Skip manifold repair")
     
     args = parser.parse_args()
     
     settings = {
+        'target': args.target,
+        'width_mm': args.width_mm,
         'smooth_iterations': args.smooth,
-        'target_faces': args.target_faces,
         'fill_holes': not args.no_fill_holes,
         'ensure_manifold': not args.no_manifold
     }
     
     try:
         repair_mesh(args.input, args.output, settings)
-        
-        # Validate repair didn't break things
-        validate_repair(args.input, args.output)
-        
         sys.exit(0)
     except Exception as e:
         print(f"[ERROR] Mesh repair failed: {e}")
